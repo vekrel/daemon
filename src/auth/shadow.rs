@@ -15,12 +15,16 @@ use std::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    Verified { scopes: Vec<String> },
+    Verified {
+        scopes: Vec<String>,
+    },
     Expired,
     Revoked,
     Malformed,
     BadSignature,
     UnknownSession,
+    /// Token claims disagree with the session row (subject, method, or scopes the row lacks).
+    Mismatch,
     NoCredential,
     DbUnavailable,
     KeyUnavailable,
@@ -110,7 +114,8 @@ impl Shadow {
         Some(*self.key.get_or_init(|| k))
     }
 
-    /// Same order of checks as the engine's `SessionStore.verify`.
+    /// The engine's `SessionStore.verify` order, then the row is the source of truth: row expiry
+    /// (as `loadActiveSession` and the dev-token path check) and row scopes.
     fn verify(&self, t: &str, key: &[u8; 32]) -> Outcome {
         let p = match token::verify(t, key) {
             Ok(p) => p,
@@ -133,11 +138,122 @@ impl Shadow {
         match store.lookup(&p.sid) {
             Ok(None) => Outcome::UnknownSession,
             Ok(Some(row)) if row.revoked_at.is_some() => Outcome::Revoked,
-            Ok(Some(_)) => Outcome::Verified { scopes: p.scopes },
+            // Row scopes may narrow the token's, never widen them.
+            Ok(Some(row))
+                if row.subject != p.sub
+                    || row.method != p.method
+                    || !row.scopes.iter().all(|s| p.scopes.contains(s)) =>
+            {
+                Outcome::Mismatch
+            }
+            Ok(Some(row)) if row.expires_at_ms <= now_ms => Outcome::Expired,
+            Ok(Some(row)) => Outcome::Verified { scopes: row.scopes },
             Err(_) => {
                 *db = None; // reopen next time
                 Outcome::DbUnavailable
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{
+        sessions::tests::DDL,
+        token::tests::{mint, payload},
+    };
+
+    const K: [u8; 32] = [7; 32];
+
+    /// A Shadow over a temp DB holding one row for `payload().sid`.
+    fn shadow(name: &str, subject: &str, scopes: &str, expires_at: &str) -> (Shadow, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("vekrel-shadow-unit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("statev2.sqlite");
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(DDL).unwrap();
+        c.execute(
+            "INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
+             VALUES (?1, ?2, ?3, 'browser-session-cookie', '2026-01-01T00:00:00.000Z', ?4)",
+            [payload().sid.as_str(), subject, scopes, expires_at],
+        )
+        .unwrap();
+        let s = Shadow {
+            key_path: dir.join("unused"),
+            db_path: db,
+            key: OnceLock::new(),
+            db: Mutex::new(None),
+        };
+        (s, dir)
+    }
+
+    fn check(name: &str, subject: &str, scopes: &str, expires_at: &str) -> Outcome {
+        let (s, dir) = shadow(name, subject, scopes, expires_at);
+        let o = s.verify(&mint(&payload(), &K), &K);
+        std::fs::remove_dir_all(dir).unwrap();
+        o
+    }
+
+    #[test]
+    fn matching_row_verifies() {
+        let o = check(
+            "ok",
+            "browser",
+            r#"["orchestration:read"]"#,
+            "2099-01-01T00:00:00.000Z",
+        );
+        assert_eq!(
+            o,
+            Outcome::Verified {
+                scopes: vec!["orchestration:read".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn row_expired_but_token_not() {
+        // payload().exp is i64::MAX; the row expired in 2026-01.
+        let o = check(
+            "rowexp",
+            "browser",
+            r#"["orchestration:read"]"#,
+            "2026-01-02T00:00:00.000Z",
+        );
+        assert_eq!(o, Outcome::Expired);
+    }
+
+    #[test]
+    fn row_scopes_override_token_scopes() {
+        // Row narrowed to a subset of the token's scopes (e.g. a later downgrade): row wins.
+        let (s, dir) = shadow(
+            "scopes",
+            "browser",
+            r#"["orchestration:read"]"#,
+            "2099-01-01T00:00:00.000Z",
+        );
+        let mut p = payload();
+        p.scopes.push("orchestration:write".into());
+        let o = s.verify(&mint(&p, &K), &K);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            o,
+            Outcome::Verified {
+                scopes: vec!["orchestration:read".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn subject_mismatch() {
+        let o = check(
+            "sub",
+            "someone-else",
+            r#"["orchestration:read"]"#,
+            "2099-01-01T00:00:00.000Z",
+        );
+        assert_eq!(o, Outcome::Mismatch);
     }
 }

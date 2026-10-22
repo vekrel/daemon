@@ -5,9 +5,11 @@ use std::path::Path;
 /// The columns `SessionStore.verify` / `loadActiveSession` read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRow {
+    pub subject: String,
+    pub method: String,
     pub scopes: Vec<String>,
-    /// ISO-8601 UTC.
-    pub expires_at: String,
+    /// `expires_at` (ISO-8601 text) as epoch milliseconds, parsed by SQLite.
+    pub expires_at_ms: i64,
     pub revoked_at: Option<String>,
 }
 
@@ -27,20 +29,25 @@ impl Store {
     pub fn lookup(&self, session_id: &str) -> rusqlite::Result<Option<SessionRow>> {
         self.0
             .prepare_cached(
-                "SELECT scopes, expires_at, revoked_at FROM auth_sessions WHERE session_id = ?1",
+                // An unparsable expires_at is NULL here, which fails the row read (fail closed).
+                "SELECT subject, method, scopes,
+                        CAST(ROUND(unixepoch(expires_at, 'subsec') * 1000) AS INTEGER), revoked_at
+                 FROM auth_sessions WHERE session_id = ?1",
             )?
             .query_row([session_id], |r| {
-                let scopes: String = r.get(0)?;
+                let scopes: String = r.get(2)?;
                 Ok(SessionRow {
+                    subject: r.get(0)?,
+                    method: r.get(1)?,
                     scopes: serde_json::from_str(&scopes).map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            0,
+                            2,
                             rusqlite::types::Type::Text,
                             e.into(),
                         )
                     })?,
-                    expires_at: r.get(1)?,
-                    revoked_at: r.get(2)?,
+                    expires_at_ms: r.get(3)?,
+                    revoked_at: r.get(4)?,
                 })
             })
             .optional()
@@ -92,8 +99,10 @@ pub(crate) mod tests {
         assert_eq!(
             s.lookup("s1").unwrap(),
             Some(SessionRow {
+                subject: "browser".into(),
+                method: "browser-session-cookie".into(),
                 scopes: vec!["a".into(), "b".into()],
-                expires_at: "2026-02-01T00:00:00.000Z".into(),
+                expires_at_ms: 1_769_904_000_000,
                 revoked_at: None,
             })
         );
