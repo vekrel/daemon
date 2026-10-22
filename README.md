@@ -20,3 +20,17 @@ args = ["/abs/path/apps/server/dist/bin.mjs"]
 ```bash
 cargo run -- serve --config vekrel.toml [--record]
 ```
+
+## Running with the reference engine
+
+Build the engine bundle and a web UI, then smoke the front door:
+
+```bash
+(cd ../Vekrel-Engine && pnpm --filter vekrel-engine build:bundle)
+(cd ../Vekrel-Web && pnpm --filter @vekrel/web build)
+scripts/smoke.sh ../Vekrel-Engine ../Vekrel-Web   # or ENGINE_DIR=... WEB_DIR=... PORT=3779
+```
+
+The script copies `Vekrel-Web/apps/web/dist` into the engine, starts `vekrel serve --record` with a temporary `VEKREL_HOME`, checks `/healthz` and `/.well-known/vekrel/machine` through the public port, then stops the daemon and deletes the temporary state.
+
+For a browser session, run `vekrel serve` yourself with a config like the one in the script. The engine logs a pairing URL with its own loopback port (`public + 10`). Replace that port with the public port before you open it so the browser goes through the proxy. With `--record`, frames are written to `$VEKREL_HOME/recordings/`. Those files contain session tokens, so never commit them.
