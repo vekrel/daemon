@@ -118,7 +118,7 @@ fn auth(e: &Env) -> Arc<AuthSession> {
 
 /// `test.echo` (`filesystem:read`): answers its payload (or `payload.value`); `{"fail":..}`
 /// fails with it; `{"wait":true}` waits for cancellation; `{"sleep":true}` ignores the token and
-/// sleeps 5 s (`dropped` is set when the seam drops it).
+/// sleeps 5 s (`dropped` is set when the seam drops it); `{"decline":true}` declines (Node answers).
 #[derive(Default)]
 struct Echo {
     started: Arc<AtomicBool>,
@@ -157,7 +157,7 @@ impl UnaryHandler for Echo {
         &'a self,
         payload: Value,
         ctx: &'a HandlerCtx,
-    ) -> BoxFuture<'a, Result<Value, Value>> {
+    ) -> BoxFuture<'a, Option<Result<Value, Value>>> {
         async move {
             assert!(
                 ctx.session.is_some(),
@@ -168,20 +168,24 @@ impl UnaryHandler for Echo {
                 // Set when cancelled, whether the token wakes it or the seam drops it first.
                 let _guard = SetOnDrop(self.cancelled.clone());
                 ctx.cancel.cancelled().await;
-                return Ok(json!("too late"));
+                return Some(Ok(json!("too late")));
             }
             if payload.get("sleep").is_some() {
                 let _guard = SetOnDrop(self.dropped.clone());
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                return Ok(json!("slept"));
+                return Some(Ok(json!("slept")));
             }
             if let Some(v) = payload.get("value") {
-                return Ok(v.clone());
+                return Some(Ok(v.clone()));
             }
-            match payload.get("fail") {
+            if payload.get("decline").is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                return None;
+            }
+            Some(match payload.get("fail") {
                 Some(e) => Err(e.clone()),
                 None => Ok(payload),
-            }
+            })
         }
         .boxed()
     }
@@ -800,4 +804,39 @@ async fn duplicate_owned_id_is_dropped_like_node() {
         echo.cancelled.load(Ordering::SeqCst),
         "the first request's token was cancelled"
     );
+}
+
+#[tokio::test]
+async fn serve_decline_forwards_the_original_request_to_node() {
+    let e = env("decline", "[]");
+    let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    // Odd spacing proves Node gets the client's bytes, not a re-serialization.
+    let req =
+        r#"{"_tag":"Request", "id":4,"tag":"test.echo","payload":{"decline":true},"headers":[]}"#;
+    send(&mut c, req).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
+    assert_eq!(
+        recv(&mut c).await,
+        exit(4, r#"{"_tag":"Success","value":{"decline":true}}"#)
+    );
+}
+
+#[tokio::test]
+async fn shadow_decline_logs_declined_without_comparing() {
+    let (logs, _g) = Logs::capture();
+    let e = env("shadow-decline", "[]");
+    let mut r = rig(seam(Mode::Shadow, Arc::default(), Some(auth(&e)))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.echo", json!({"decline":true}))).await;
+    let _ = next_ev(&mut r).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(1, r#"{"_tag":"Success","value":{"decline":true}}"#)
+    );
+    barrier(&mut r, &mut c, 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let lines = logs.lines("rust shadow");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("outcome=\"declined\""), "{lines:?}");
 }

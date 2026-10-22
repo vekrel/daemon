@@ -1,6 +1,6 @@
 use crate::{
     proxy_http::{add_forwarded, error, strip_hop_by_hop},
-    rpc_seam::{Conn, Fwd},
+    rpc_seam::{Conn, Fwd, Out},
     server::Upstream,
     supervisor::State,
 };
@@ -174,8 +174,12 @@ async fn pump<U>(
                 if client.send(to_axum(m)).await.is_err() || close { break }
             }
             Some(d) = done.recv() => {
-                if let Some(f) = rpc.done(d)
-                    && client.send(rust(f)).await.is_err() { break }
+                let sent = match rpc.done(d) {
+                    Some(Out::Client(f)) => client.send(rust(f)).await.map_err(drop),
+                    Some(Out::Node(t)) => up.send(Message::text(t)).await.map_err(drop),
+                    None => Ok(()),
+                };
+                if sent.is_err() { break }
             }
             _ = generation.changed() => {
                 let f = AxClose { code: 1012, reason: "engine restarted".into() };

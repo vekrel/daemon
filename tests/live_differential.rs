@@ -1,6 +1,7 @@
-//! Differential tests against the real engine: `GET /api/auth/session` and
-//! `GET /.well-known/vekrel/machine` through the daemon in shadow mode must log a `match` for
-//! every request and no `mismatch`.
+//! Differential tests against the real engine: `GET /api/auth/session`,
+//! `GET /.well-known/vekrel/machine` and the `projects.readFile` / `filesystem.browse` RPCs
+//! through the daemon in shadow mode must log a `match` for every request Rust answers and no
+//! `mismatch`.
 //!
 //! Ignored unless `VEKREL_LIVE_ENGINE` is the engine's `apps/server/dist/bin.mjs`:
 //! `VEKREL_LIVE_ENGINE=/path/to/bin.mjs cargo test --test live_differential -- --ignored --nocapture`
@@ -86,7 +87,7 @@ fn start_with(
             "[server]\nport = {public}\n[engine]\ncommand = \"node\"\nargs = [{bin:?}]\nport = {engine}\n\
              [rust.handlers]\n\"GET /api/auth/session\" = \"shadow\"\n\
              \"GET /.well-known/vekrel/machine\" = \"shadow\"\n\
-             \"projects.readFile\" = \"shadow\"\n"
+             \"projects.readFile\" = \"shadow\"\n\"filesystem.browse\" = \"shadow\"\n"
         ),
     )
     .unwrap();
@@ -501,6 +502,173 @@ fn read_file_shadow_matches_node() {
         assert_eq!(mm, 0);
         assert!(m > cases.len(), "the browser boot sent projects.readFile");
     }
+    drop(d);
+    assert!(!home.exists());
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn browse_shadow_matches_node() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    // The engine's `os.homedir()` is this temp dir, filled with the add-project flow's tricky names.
+    let Some((d, base, home, token)) = start_with("browse", |h, cmd| {
+        std::fs::create_dir_all(h.join("home")).unwrap();
+        cmd.env("HOME", h.join("home"));
+    }) else {
+        return;
+    };
+    let tree = home.join("home").canonicalize().unwrap();
+    for n in [
+        "Alpha",
+        "beta",
+        "Ébauche",
+        "école",
+        "10-ten",
+        "2-two",
+        "_under",
+        "-dash",
+        ".dot",
+        ".Hidden",
+        "🎉 party",
+        "naïve",
+        "Zeta",
+        "ünïcödé",
+        "Ωmega",
+        "Жук",
+        "İstanbul",
+        "ΟΔΟΣ",
+        "Straße",
+        "a b",
+        "locked",
+        "han",
+        "Alpha/inner",
+    ] {
+        std::fs::create_dir_all(tree.join(n)).unwrap();
+    }
+    std::fs::create_dir(tree.join("han/不")).unwrap();
+    std::fs::write(tree.join("file.txt"), "").unwrap();
+    std::os::unix::fs::symlink(tree.join("beta"), tree.join("link-dir")).unwrap();
+    // Unlocked on drop (before the home is deleted), even on panic.
+    struct Locked(PathBuf);
+    impl Drop for Locked {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let locked = Locked(tree.join("locked"));
+    std::fs::set_permissions(&locked.0, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let t = tree.to_str().unwrap();
+    let mut answered: Vec<serde_json::Value> = [
+        "~",
+        "~/",
+        " ~/ ",
+        "~/a",
+        "~/A",
+        "~/É",
+        "~/é",
+        "~/.",
+        "~/.h",
+        "~/1",
+        "~/🎉",
+        "~/z",
+        "~/Ж",
+        "~/i",
+        "~/İ",
+        "~/ΟΔ",
+        "~/οδοσ",
+        "~/straß",
+        "~/a ",
+        "/",
+        "/U",
+    ]
+    .iter()
+    .map(|p| serde_json::json!({"partialPath": p}))
+    .collect();
+    for p in ["/", "/na", "/locked/", "/Alpha/"] {
+        answered.push(serde_json::json!({"partialPath": format!("{t}{p}")}));
+    }
+    answered.push(serde_json::json!({"partialPath": "./", "cwd": t}));
+    answered.push(serde_json::json!({"partialPath": "../", "cwd": format!("{t}/Alpha")}));
+    // Node answers these alone: errors, a Han name, a path relative to Node's cwd.
+    let declined: Vec<serde_json::Value> = [
+        format!("{t}/missing/"),
+        format!("{t}/han/"),
+        format!("{t}/file.txt/"),
+        "C:\\Users".into(),
+        "./x".into(),
+        "relative".into(),
+    ]
+    .into_iter()
+    .map(|p| serde_json::json!({"partialPath": p}))
+    .collect();
+
+    let cookie = pair(&base, &home, &token);
+    let ws = base.replace("http://", "ws://") + "/ws?orchestrationProtocol=2";
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let replies = rt.block_on(async {
+        let mut req = ws.into_client_request().unwrap();
+        let h = req.headers_mut();
+        h.insert("cookie", cookie.parse().unwrap());
+        h.insert("origin", base.parse().unwrap());
+        let (mut c, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+        let all: Vec<_> = answered.iter().chain(&declined).collect();
+        let mut replies = Vec::new();
+        for (id, payload) in all.iter().enumerate() {
+            let r = serde_json::json!({"_tag":"Request","id":id,"tag":"filesystem.browse",
+                "payload":payload,"traceId":"0123456789abcdef0123456789abcdef",
+                "spanId":"0123456789abcdef","sampled":true,"headers":[]});
+            c.send(Message::text(r.to_string())).await.unwrap();
+            loop {
+                let m = tokio::time::timeout(Duration::from_secs(10), c.next())
+                    .await
+                    .expect("reply")
+                    .unwrap()
+                    .unwrap();
+                let Message::Text(t) = m else { continue };
+                let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+                if v["_tag"] == "Exit" && v["requestId"] == id {
+                    replies.push(v["exit"]["_tag"].as_str().unwrap().to_owned());
+                    break;
+                }
+            }
+        }
+        replies
+    });
+    // Every request got Node's answer; the answered ones succeed.
+    assert_eq!(replies.len(), answered.len() + declined.len());
+    assert!(
+        replies[..answered.len()].iter().all(|r| r == "Success"),
+        "{replies:?}"
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    let l = log(&home);
+    let lines: Vec<&str> = l
+        .lines()
+        .filter(|l| l.contains("rust shadow") && l.contains("tag=\"filesystem.browse\""))
+        .collect();
+    let count = |o: &str| {
+        lines
+            .iter()
+            .filter(|l| l.contains(&format!("outcome=\"{o}\"")))
+            .count()
+    };
+    let (matches, mismatches, declines) = (count("match"), count("mismatch"), count("declined"));
+    for m in lines.iter().filter(|l| l.contains("mismatch")) {
+        println!("{m}");
+    }
+    println!(
+        "browse shadow log: {matches} match, {mismatches} mismatch, {declines} declined (of {} requests)",
+        replies.len()
+    );
+    assert_eq!(mismatches, 0);
+    assert_eq!(matches, answered.len(), "every answerable request compared");
+    assert_eq!(declines, declined.len());
+    drop(locked);
     drop(d);
     assert!(!home.exists());
 }

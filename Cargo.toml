@@ -10,6 +10,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 futures-util = "0.3.34"
 hmac = "0.13.0"
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-legacy", "http1", "tokio"] }
+icu_collator = "2.4.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }

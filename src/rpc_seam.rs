@@ -26,12 +26,13 @@ pub trait UnaryHandler: Send + Sync {
     fn tag(&self) -> &'static str;
     /// The scope `RpcAuthorization.ts` requires for this tag.
     fn required_scope(&self) -> &'static str;
-    /// `Ok`: the Exit Success value; `Err`: the tagged error for Exit Failure `[{_tag:"Fail",error}]`.
+    /// `Ok`: the Exit Success value; `Err`: the tagged error for Exit Failure `[{_tag:"Fail",error}]`;
+    /// `None`: not mine, Node answers (serve forwards the request late; shadow skips the compare).
     fn handle<'a>(
         &'a self,
         payload: Value,
         ctx: &'a HandlerCtx,
-    ) -> BoxFuture<'a, Result<Value, Value>>;
+    ) -> BoxFuture<'a, Option<Result<Value, Value>>>;
 }
 
 #[derive(Default)]
@@ -130,8 +131,15 @@ fn exit_frame(id: &Value, exit: &Value) -> String {
 pub(crate) struct Done {
     key: String,
     id: Value,
-    /// `None`: a shadow computation that timed out or panicked.
+    /// `None`: the handler declined, or a shadow computation timed out or panicked.
     exit: Option<Value>,
+}
+
+/// Where a finished handler's frame goes.
+pub(crate) enum Out {
+    Client(String),
+    /// A served request the handler declined: the client's request, for Node to answer.
+    Node(String),
 }
 
 struct Shadowed {
@@ -174,7 +182,8 @@ pub(crate) enum Fwd {
 pub(crate) struct Conn {
     seam: Arc<Seam>,
     session: WsSession,
-    owned: HashMap<String, CancellationToken>,
+    /// Served requests in flight: their cancel token and the request text to forward on decline.
+    owned: HashMap<String, (CancellationToken, String)>,
     shadow: HashMap<String, Shadowed>,
     done: UnboundedSender<Done>,
     limit: ShadowLimit,
@@ -183,7 +192,11 @@ pub(crate) struct Conn {
 impl Drop for Conn {
     fn drop(&mut self) {
         let shadowed = self.shadow.values().map(|s| &s.cancel);
-        self.owned.values().chain(shadowed).for_each(|c| c.cancel());
+        self.owned
+            .values()
+            .map(|o| &o.0)
+            .chain(shadowed)
+            .for_each(|c| c.cancel());
     }
 }
 
@@ -216,7 +229,7 @@ impl Conn {
                 let n = items.len();
                 let rest: Vec<_> = items
                     .into_iter()
-                    .filter(|m| !self.take(m, &mut out))
+                    .filter(|m| !self.take(m, None, &mut out))
                     .collect();
                 match rest.len() {
                     0 => Fwd::Nothing,
@@ -225,17 +238,18 @@ impl Conn {
                     _ => Fwd::Text(Value::Array(rest).to_string()),
                 }
             }
-            Ok(m) if self.take(&m, &mut out) => Fwd::Nothing,
+            Ok(m) if self.take(&m, Some(text), &mut out) => Fwd::Nothing,
             Ok(_) => Fwd::Original,
         };
         (fwd, out)
     }
 
-    /// Handles `m` if Rust owns it; `false` means forward it.
-    fn take(&mut self, m: &Value, out: &mut Vec<String>) -> bool {
+    /// Handles `m` (whose frame text is `raw` unless it came from an array) if Rust owns it;
+    /// `false` means forward it.
+    fn take(&mut self, m: &Value, raw: Option<&str>, out: &mut Vec<String>) -> bool {
         let key = m.get("requestId").map(Value::to_string);
         match m.get("_tag").and_then(Value::as_str) {
-            Some("Request") => self.request(m, out),
+            Some("Request") => self.request(m, raw, out),
             Some("Ack") => key.is_some_and(|k| self.owned.contains_key(&k)),
             Some("Interrupt") => {
                 let Some(k) = key else { return false };
@@ -243,7 +257,7 @@ impl Conn {
                     s.cancel.cancel(); // Node answers the Interrupt; nothing to compare.
                     return false;
                 }
-                let Some(cancel) = self.owned.remove(&k) else {
+                let Some((cancel, _)) = self.owned.remove(&k) else {
                     return false;
                 };
                 cancel.cancel();
@@ -254,7 +268,7 @@ impl Conn {
         }
     }
 
-    fn request(&mut self, m: &Value, out: &mut Vec<String>) -> bool {
+    fn request(&mut self, m: &Value, raw: Option<&str>, out: &mut Vec<String>) -> bool {
         let (Some(id), Some(tag)) = (m.get("id"), m.get("tag").and_then(Value::as_str)) else {
             return false;
         };
@@ -291,14 +305,16 @@ impl Conn {
                     out.push(exit_frame(id, &denied()));
                     return true;
                 };
-                self.owned.insert(key.clone(), cancel.clone());
+                // An array element is re-encoded, like the remainder of a split array frame.
+                let raw = raw.map_or_else(|| m.to_string(), str::to_owned);
+                self.owned.insert(key.clone(), (cancel.clone(), raw));
                 let task = tokio::spawn(self.run(h, payload, s, cancel));
                 let done = self.done.clone();
                 let id = id.clone();
                 tokio::spawn(async move {
                     // What Node sends for a defect, so the client's request still ends.
                     let die = || failure(json!({"_tag": "Die", "defect": "rust handler panicked"}));
-                    let exit = Some(task.await.unwrap_or_else(|_| die()));
+                    let exit = task.await.unwrap_or_else(|_| Some(die()));
                     let _ = done.send(Done { key, id, exit });
                 });
                 true
@@ -322,9 +338,7 @@ impl Conn {
                     None => entry.rust = Some(denied().to_string()),
                     Some(s) => {
                         let run = self.run(h, payload, s, cancel);
-                        let Some(task) =
-                            self.limit.spawn(entry.tag, async move { Some(run.await) })
-                        else {
+                        let Some(task) = self.limit.spawn(entry.tag, run) else {
                             return false;
                         };
                         let (done, key, id) = (self.done.clone(), key.clone(), id.clone());
@@ -341,14 +355,14 @@ impl Conn {
         }
     }
 
-    /// The handler's Exit for one request.
+    /// The handler's Exit for one request; `None` if it declined.
     fn run(
         &self,
         h: Arc<dyn UnaryHandler>,
         payload: Value,
         session: VerifiedSession,
         cancel: CancellationToken,
-    ) -> impl Future<Output = Value> + Send + 'static {
+    ) -> impl Future<Output = Option<Value>> + Send + 'static {
         let ctx = HandlerCtx {
             session: Some(session),
             cancel: cancel.clone(),
@@ -356,21 +370,29 @@ impl Conn {
         };
         async move {
             // Cancellation drops the handler even if it never looks at the token.
-            tokio::select! {
+            let r = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => interrupted(),
-                r = h.handle(payload, &ctx) => match r {
-                    Ok(v) => success(v),
-                    Err(e) => failure(json!({"_tag": "Fail", "error": e})),
-                },
-            }
+                _ = cancel.cancelled() => return Some(interrupted()),
+                r = h.handle(payload, &ctx) => r,
+            };
+            let Some(r) = r else {
+                tracing::info!(tag = h.tag(), outcome = "declined", "rust shadow");
+                return None;
+            };
+            Some(match r {
+                Ok(v) => success(v),
+                Err(e) => failure(json!({"_tag": "Fail", "error": e})),
+            })
         }
     }
 
-    /// A handler finished: the frame to write for a served request, if it is still owned.
-    pub(crate) fn done(&mut self, d: Done) -> Option<String> {
-        if self.owned.remove(&d.key).is_some() {
-            return d.exit.map(|e| exit_frame(&d.id, &e));
+    /// A handler finished: for a served request still owned, its Exit, or the request for Node.
+    pub(crate) fn done(&mut self, d: Done) -> Option<Out> {
+        if let Some((_, raw)) = self.owned.remove(&d.key) {
+            return Some(match d.exit {
+                Some(e) => Out::Client(exit_frame(&d.id, &e)),
+                None => Out::Node(raw),
+            });
         }
         match d.exit {
             None => drop(self.shadow.remove(&d.key)),

@@ -25,7 +25,7 @@ impl UnaryHandler for ReadFile {
         &'a self,
         payload: Value,
         ctx: &'a HandlerCtx,
-    ) -> BoxFuture<'a, Result<Value, Value>> {
+    ) -> BoxFuture<'a, Option<Result<Value, Value>>> {
         let proc_cwd = ctx.cwd.to_string_lossy().into_owned();
         // `os.homedir()`: `$HOME`, else the passwd entry.
         let home = std::env::var("HOME")
@@ -33,9 +33,9 @@ impl UnaryHandler for ReadFile {
             .or_else(|| std::env::home_dir().map(|h| h.to_string_lossy().into_owned()))
             .unwrap_or_default();
         async move {
-            tokio::task::spawn_blocking(move || read_file(&payload, &proc_cwd, &home))
-                .await
-                .expect("read_file does not panic")
+            let r =
+                tokio::task::spawn_blocking(move || read_file(&payload, &proc_cwd, &home)).await;
+            Some(r.expect("read_file does not panic"))
         }
         .boxed()
     }
