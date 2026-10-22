@@ -71,6 +71,12 @@ fn try_start(name: &str, command: &str, args: &[&str]) -> Option<(Guard, u16)> {
     None
 }
 
+/// Starts vekrel over tests/fake_engine.py, which serves the readiness path.
+fn start_fake(name: &str, flags: &[&str]) -> (Guard, u16) {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_engine.py");
+    start(name, "python3", &[&[script], flags].concat())
+}
+
 async fn health(port: u16) -> Option<(String, u64)> {
     let v: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/healthz"))
         .await
@@ -129,26 +135,18 @@ async fn missing_binary_reports_down_without_panic() {
 
 #[tokio::test]
 async fn running_engine_reports_up() {
-    let (_g, port) = start("up", "sleep", &["30"]);
+    let (_g, port) = start_fake("up", &[]);
     let seen = poll(port, Duration::from_secs(5), |h| h.0 == "up").await;
     assert_eq!(seen.last(), Some(&("up".to_string(), 0)), "{seen:?}");
 }
 
 #[tokio::test]
 async fn sigterm_stops_engine_child() {
-    let marker = format!("3{}", std::process::id()); // unique sleep arg to find the child
-    let (mut g, port) = start("sigterm", "sleep", &[&marker]);
+    let marker = format!("3{}", std::process::id()); // unique marker arg to find the child
+    let (mut g, port) = start_fake("sigterm", &[&marker]);
     let seen = poll(port, Duration::from_secs(2), |h| h.0 == "up").await;
     assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
-    let pattern = format!("sleep {marker}");
-    let found = || {
-        Command::new("pgrep")
-            .args(["-f", &pattern])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    };
+    let found = || running(&marker);
     assert!(found(), "engine child not running");
     Command::new("kill")
         .args(["-TERM", &g.0.id().to_string()])
@@ -175,7 +173,6 @@ async fn child_receives_vekrel_port_env() {
         b.display()
     );
     let (_g, port) = start("env", "sh", &["-c", &script]);
-    poll(port, Duration::from_secs(2), |h| h.0 == "up").await;
     wait_for(Duration::from_secs(5), || {
         [&a, &b]
             .iter()
@@ -228,14 +225,10 @@ async fn sigterm_and_wait(g: &mut Guard, limit: Duration) -> (Duration, bool) {
 async fn sigterm_sends_sigterm_to_engine_and_waits() {
     let file = std::env::temp_dir().join(format!("vekrel-graceful-{}", std::process::id()));
     let _ = std::fs::remove_file(&file);
-    let script = format!(
-        "trap 'echo graceful > {}; exit 0' TERM; while true; do sleep 0.1; done",
-        file.display()
-    );
-    let (mut g, port) = start("graceful", "sh", &["-c", &script]);
+    let flag = format!("term-file={}", file.display());
+    let (mut g, port) = start_fake("graceful", &[&flag]);
     let seen = poll(port, Duration::from_secs(5), |h| h.0 == "up").await;
     assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
-    tokio::time::sleep(Duration::from_millis(200)).await; // let sh install its trap
     let (_, ok) = sigterm_and_wait(&mut g, Duration::from_secs(7)).await;
     assert!(ok, "vekrel exit status not 0");
     let got = std::fs::read_to_string(&file).unwrap_or_default();
@@ -246,11 +239,9 @@ async fn sigterm_sends_sigterm_to_engine_and_waits() {
 #[tokio::test]
 async fn engine_ignoring_sigterm_is_killed_after_grace() {
     let marker = format!("stubborn-{}", std::process::id());
-    let script = format!("trap '' TERM; while true; do sleep 0.1; done # {marker}");
-    let (mut g, port) = start("stubborn", "sh", &["-c", &script]);
+    let (mut g, port) = start_fake("stubborn", &["ignore-term", &marker]);
     let seen = poll(port, Duration::from_secs(5), |h| h.0 == "up").await;
     assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
-    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(running(&marker), "engine child not running");
     let (took, ok) = sigterm_and_wait(&mut g, Duration::from_millis(6500)).await;
     assert!(ok, "vekrel exit status not 0");
@@ -262,4 +253,26 @@ async fn engine_ignoring_sigterm_is_killed_after_grace() {
         wait_for(Duration::from_secs(1), || !running(&marker)).await,
         "engine child still running"
     );
+}
+
+#[tokio::test]
+async fn health_is_down_until_engine_serves_readiness_path() {
+    let (_g, port) = start_fake("ready", &["delay=1"]);
+    let t0 = std::time::Instant::now();
+    let seen = poll(port, Duration::from_secs(6), |h| h.0 == "up").await;
+    assert_eq!(seen.first().map(|h| h.0.as_str()), Some("down"), "{seen:?}");
+    assert_eq!(seen.last(), Some(&("up".to_string(), 0)), "{seen:?}");
+    assert!(
+        t0.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn live_but_never_ready_engine_stays_down() {
+    let (_g, port) = start_fake("noready", &["noready"]);
+    let seen = poll(port, Duration::from_secs(3), |_| false).await;
+    assert!(seen.iter().all(|h| h.0 == "down"), "{seen:?}");
+    assert_eq!(seen.last().unwrap().1, 0, "{seen:?}");
 }

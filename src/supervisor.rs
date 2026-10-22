@@ -57,16 +57,19 @@ pub async fn run(cfg: EngineConfig, port: u16, state: Arc<State>) {
             .spawn();
         match spawned {
             Ok(mut child) => {
-                state.engine_up.store(true, Ordering::SeqCst);
+                let probe = tokio::spawn(mark_up_when_ready(state.clone(), port));
                 let status = tokio::select! {
-                    s = child.wait() => s,
+                    s = child.wait() => Some(s),
                     _ = shutdown.wait_for(|&s| s).map(drop) => {
                         stop(&mut child).await;
-                        state.engine_up.store(false, Ordering::SeqCst);
-                        return;
+                        None
                     }
                 };
+                // Awaited so a late probe cannot flip engine_up back on after the reset.
+                probe.abort();
+                let _ = probe.await;
                 state.engine_up.store(false, Ordering::SeqCst);
+                let Some(status) = status else { return };
                 match status {
                     Ok(s) if s.success() => {
                         tracing::info!("engine exited cleanly");
@@ -94,6 +97,40 @@ pub async fn run(cfg: EngineConfig, port: u16, state: Arc<State>) {
         }
         attempt += 1;
     }
+}
+
+/// Longest an engine gets to start answering before it is left "down" (the max backoff).
+const READY_WINDOW: Duration = Duration::from_secs(30);
+
+/// Readiness, not liveness: up only once `GET /.well-known/vekrel/machine` returns 2xx.
+async fn mark_up_when_ready(state: Arc<State>, port: u16) {
+    let end = Instant::now() + READY_WINDOW;
+    while Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if probe(port).await {
+            state.engine_up.store(true, Ordering::SeqCst);
+            return;
+        }
+    }
+}
+
+async fn probe(port: u16) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let req =
+        "GET /.well-known/vekrel/machine HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let attempt = async {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        s.write_all(req.as_bytes()).await.ok()?;
+        let mut line = [0u8; 12]; // "HTTP/1.1 2xx"
+        s.read_exact(&mut line).await.ok()?;
+        Some(line.starts_with(b"HTTP/1.") && line[9] == b'2')
+    };
+    matches!(
+        tokio::time::timeout(Duration::from_secs(1), attempt).await,
+        Ok(Some(true))
+    )
 }
 
 /// SIGTERM, then SIGKILL after `GRACE`, so the engine can stop the agents it started.
