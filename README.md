@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/brand/logo-horizontal-on-dark.png">
+    <img src=".github/brand/logo-horizontal-on-light.png" alt="Vekrel" width="360">
+  </picture>
+</p>
+
 # Vekrel-Daemon
 
 The Rust daemon that runs on each machine. `vekrel serve` supervises the Vekrel engine (Node) on a loopback port and fronts it on one public port.
