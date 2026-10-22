@@ -35,7 +35,14 @@ impl Drop for Guard {
 async fn serve(app: Router) -> (u16, Guard) {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
-    let h = tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let h = tokio::spawn(async move {
+        axum::serve(
+            l,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
     (port, Guard(h))
 }
 
@@ -51,6 +58,16 @@ async fn fake_upstream(ev: UnboundedSender<String>) -> (u16, Guard) {
                 let cookie = h.get("cookie").map(|v| v.to_str().unwrap().to_owned());
                 ev.send(format!("cookie:{}", cookie.unwrap_or_default()))
                     .unwrap();
+                if q.contains("fwd") {
+                    let g = |n: &str| h.get(n).map_or("", |v| v.to_str().unwrap()).to_owned();
+                    ev.send(format!(
+                        "fwd:{}|{}|{}",
+                        g("x-forwarded-host"),
+                        g("x-forwarded-proto"),
+                        g("x-forwarded-for")
+                    ))
+                    .unwrap();
+                }
                 ws.on_upgrade(move |mut s| async move {
                     if q.contains("closeme") {
                         let f = AxClose {
@@ -233,4 +250,16 @@ async fn ping_from_client_is_forwarded_not_answered_locally() {
     assert_eq!(event(&mut r.ev).await, r#"text:{"_tag":"Ping"}"#);
     c.send(Message::Ping("hb".into())).await.unwrap();
     assert_eq!(event(&mut r.ev).await, "ping:hb");
+}
+
+#[tokio::test]
+async fn ws_upgrade_carries_forwarded_host() {
+    let mut r = rig().await;
+    let _c = connect(r.proxy, "?fwd=1", None).await;
+    event(&mut r.ev).await; // query
+    event(&mut r.ev).await; // cookie
+    assert_eq!(
+        event(&mut r.ev).await,
+        format!("fwd:127.0.0.1:{}|http|127.0.0.1", r.proxy)
+    );
 }

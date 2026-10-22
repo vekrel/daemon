@@ -1,19 +1,19 @@
 use crate::{
-    proxy_http::{error, strip_hop_by_hop},
+    proxy_http::{add_forwarded, error, strip_hop_by_hop},
     server::Upstream,
     supervisor::State,
 };
 use axum::{
     body::Body,
     extract::{
-        State as AxState, WebSocketUpgrade,
+        ConnectInfo, Extension, State as AxState, WebSocketUpgrade,
         ws::{CloseFrame as AxClose, Message as AxMsg, WebSocket},
     },
     http::{HeaderMap, StatusCode, Uri, header},
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::watch;
 use tokio_tungstenite::{
     connect_async,
@@ -58,6 +58,7 @@ pub async fn handler(
     AxState(ctx): AxState<Ctx>,
     uri: Uri,
     headers: HeaderMap,
+    conn: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
     // Subscribed before dialing: a restart during the handshake still closes the socket.
     let generation = ctx.state.generation_tx.subscribe();
@@ -69,8 +70,11 @@ pub async fn handler(
             req.headers_mut().append(name.clone(), v.clone());
         }
     }
-    req.headers_mut()
-        .insert("x-vekrel-proxy", header::HeaderValue::from_static("1"));
+    add_forwarded(
+        req.headers_mut(),
+        headers.get(header::HOST).cloned(),
+        conn.map(|c| c.0.0.ip()),
+    );
 
     let (up, res) = match connect_async(req).await {
         Ok(ok) => ok,

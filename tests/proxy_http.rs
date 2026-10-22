@@ -13,7 +13,14 @@ use vekrel::{server, supervisor::State};
 async fn serve(app: Router) -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    tokio::spawn(async move {
+        axum::serve(
+            l,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
     port
 }
 
@@ -186,4 +193,49 @@ async fn engine_down_returns_502_json() {
     assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(r.headers()["content-type"], "application/json");
     assert_eq!(r.text().await.unwrap(), r#"{"error":"engine_unreachable"}"#);
+}
+
+/// Upstream that records the request headers it sees.
+async fn header_probe() -> (u16, Arc<Mutex<HeaderMap>>) {
+    let seen: Arc<Mutex<HeaderMap>> = Default::default();
+    let s = seen.clone();
+    let up = serve(Router::new().fallback(any(move |h: HeaderMap| {
+        let s = s.clone();
+        async move {
+            *s.lock().await = h;
+            "ok"
+        }
+    })))
+    .await;
+    (up, seen)
+}
+
+#[tokio::test]
+async fn forwarded_headers_reach_upstream() {
+    let (up, seen) = header_probe().await;
+    let base = proxy(up).await;
+    reqwest::get(format!("{base}/x")).await.unwrap();
+    let h = seen.lock().await;
+    assert_eq!(h["x-forwarded-host"], base.trim_start_matches("http://"));
+    assert_eq!(h["x-forwarded-proto"], "http");
+    assert_eq!(h["x-forwarded-for"], "127.0.0.1");
+    assert_eq!(h["x-vekrel-proxy"], "1");
+}
+
+#[tokio::test]
+async fn client_supplied_forwarded_host_is_overwritten() {
+    let (up, seen) = header_probe().await;
+    let base = proxy(up).await;
+    reqwest::Client::new()
+        .get(format!("{base}/x"))
+        .header("x-forwarded-host", "evil.example")
+        .header("x-forwarded-proto", "https")
+        .header("x-forwarded-for", "10.0.0.9")
+        .send()
+        .await
+        .unwrap();
+    let h = seen.lock().await;
+    assert_eq!(h["x-forwarded-host"], base.trim_start_matches("http://"));
+    assert_eq!(h["x-forwarded-proto"], "http");
+    assert_eq!(h["x-forwarded-for"], "10.0.0.9, 127.0.0.1");
 }

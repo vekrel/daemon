@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.server.port)).await?;
     // Returning drops the runtime, which drops the supervisor's child (kill_on_drop).
     tokio::select! {
-        r = axum::serve(listener, server::build_with_tap(state, server::Upstream::loopback(engine_port), tap)) => r?,
+        r = axum::serve(listener, server::build_with_tap(state, server::Upstream::loopback(engine_port), tap).into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
         _ = shutdown_signal() => tracing::info!("shutting down"),
     }
     Ok(())
