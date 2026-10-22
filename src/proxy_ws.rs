@@ -78,14 +78,16 @@ pub async fn handler(
         conn.map(|c| c.0.0.ip()),
     );
 
-    let (up, res) = match connect_async(req).await {
-        Ok(ok) => ok,
-        Err(WsError::Http(res)) => {
+    let dial = tokio::time::timeout(ctx.upstream.dial_timeout, connect_async(req));
+    let (up, res) = match dial.await {
+        Err(_) => return error(StatusCode::GATEWAY_TIMEOUT, "engine_timeout"),
+        Ok(Ok(ok)) => ok,
+        Ok(Err(WsError::Http(res))) => {
             let (mut parts, body) = res.into_parts();
             strip_hop_by_hop(&mut parts.headers);
             return Response::from_parts(parts, Body::from(body.unwrap_or_default()));
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!("engine ws dial failed: {e}");
             return error(StatusCode::BAD_GATEWAY, "engine_unreachable");
         }

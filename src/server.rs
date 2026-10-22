@@ -9,7 +9,10 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use serde_json::{Value, json};
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 /// Where the Node engine listens (always loopback), plus a pooled client to reach it.
 #[derive(Clone, Debug)]
@@ -19,11 +22,18 @@ pub struct Upstream {
     /// The port clients reach this proxy on; only loopback hosts on it are forwarded as X-Forwarded-Host.
     pub public_port: u16,
     pub client: Client<HttpConnector, Body>,
+    /// Bound on the WS handshake with the engine.
+    pub dial_timeout: Duration,
 }
 
 impl Upstream {
     pub fn with_public_port(mut self, public_port: u16) -> Self {
         self.public_port = public_port;
+        self
+    }
+
+    pub fn with_dial_timeout(mut self, dial_timeout: Duration) -> Self {
+        self.dial_timeout = dial_timeout;
         self
     }
 
@@ -34,6 +44,7 @@ impl Upstream {
             port,
             public_port: 0,
             client,
+            dial_timeout: Duration::from_secs(10),
         }
     }
 }

@@ -293,3 +293,35 @@ async fn ws_clients_get_1001_on_shutdown() {
     r.state.shutdown();
     assert_eq!(close_of(recv(&mut c).await), (1001, "going away".into()));
 }
+
+#[tokio::test]
+async fn ws_dial_timeout_returns_504_json() {
+    // Accepts TCP but never answers the handshake.
+    let black_hole = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up = black_hole.local_addr().unwrap().port();
+    let _keep = tokio::spawn(async move {
+        let mut held = vec![];
+        while let Ok(s) = black_hole.accept().await {
+            held.push(s);
+        }
+    });
+    let upstream = server::Upstream::loopback(up).with_dial_timeout(Duration::from_millis(500));
+    let (proxy, _g) = serve(server::build(Arc::new(State::default()), upstream)).await;
+    let t0 = std::time::Instant::now();
+    let err = tokio::time::timeout(
+        Duration::from_secs(3),
+        connect_async(format!("ws://127.0.0.1:{proxy}/ws")),
+    )
+    .await
+    .expect("proxy answered in time")
+    .unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(res) = err else {
+        panic!("expected http rejection, got {err:?}");
+    };
+    assert_eq!(res.status(), 504);
+    assert_eq!(
+        res.body().as_deref(),
+        Some(&br#"{"error":"engine_timeout"}"#[..])
+    );
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+}
