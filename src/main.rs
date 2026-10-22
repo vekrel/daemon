@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use vekrel::{
-    auth, config,
+    auth::{self, shadow::AuthFiles},
+    config,
+    handlers::{HandlerCtx, auth_session},
+    http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
     server, supervisor,
@@ -41,25 +44,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(r) => r.clone(),
         None => Arc::new(NoTap),
     };
+    // Same layout as the engine's config.ts: <base>/userdata/{statev2.sqlite,secrets/}.
+    let auth_files = match state_dir() {
+        Ok(base) => {
+            let userdata = base.join("userdata");
+            let files = Arc::new(AuthFiles::new(
+                userdata.join("secrets/server-signing-key.bin"),
+                userdata.join("statev2.sqlite"),
+            ));
+            Some((userdata, files))
+        }
+        Err(e) => {
+            tracing::warn!("shadow auth and Rust handlers disabled: {e}");
+            None
+        }
+    };
+    let mut seam = Seam::default();
+    if let Some((userdata, files)) = &auth_files {
+        seam = Seam::new(HandlerCtx {
+            cwd: std::env::current_dir()?,
+            state_dir: userdata.clone(),
+            engine_port,
+        });
+        let unsupported =
+            auth_session::unsupported_engine(&cfg.engine.args, |k| std::env::var(k).ok());
+        match (unsupported, userdata.to_str()) {
+            (Some(why), _) => tracing::warn!("GET /api/auth/session handler disabled: {why}"),
+            (None, None) => {
+                tracing::warn!("GET /api/auth/session handler disabled: non-UTF-8 state dir")
+            }
+            (None, Some(dir)) => {
+                // The supervisor pins the engine to VEKREL_HOST=127.0.0.1, so no machine id is needed.
+                let desc = auth_session::Descriptor::web("127.0.0.1", engine_port, dir, "");
+                let h: Arc<dyn RouteHandler> =
+                    Arc::new(auth_session::AuthSession::new(desc, files.clone()));
+                let mode = cfg.rust.mode(&http_seam::key(&*h));
+                seam = seam.with(mode, h);
+            }
+        }
+    }
     let state = Arc::new(supervisor::State::default());
     let engine = tokio::spawn(supervisor::run(cfg.engine, engine_port, state.clone()));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.server.port)).await?;
     let mut app = server::build_with_tap(
         state.clone(),
-        server::Upstream::loopback(engine_port).with_public_port(cfg.server.port),
+        server::Upstream::loopback(engine_port)
+            .with_public_port(cfg.server.port)
+            .with_seam(seam),
         tap,
     );
-    match state_dir() {
-        // Same layout as the engine's config.ts: <base>/userdata/{statev2.sqlite,secrets/}.
-        Ok(base) => {
-            let userdata = base.join("userdata");
-            app = auth::shadow::apply(
-                app,
-                userdata.join("secrets/server-signing-key.bin"),
-                userdata.join("statev2.sqlite"),
-            );
-        }
-        Err(e) => tracing::warn!("shadow auth disabled: {e}"),
+    if let Some((_, files)) = auth_files {
+        app = auth::shadow::apply_shared(app, files);
     }
     tokio::select! {
         r = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
@@ -75,13 +110,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `$VEKREL_HOME`, else `~/.vekrel` (same rule as the engine).
+/// The engine's `resolveBaseDir` (`os-jank.ts`): trimmed `$VEKREL_HOME` with `~` expanded, made
+/// absolute and normalized like `path.resolve`, else `~/.vekrel`. The exact string matters: the
+/// session cookie name hashes it.
 fn state_dir() -> Result<PathBuf, &'static str> {
-    if let Some(h) = std::env::var_os("VEKREL_HOME") {
-        return Ok(h.into());
+    let home = || {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .ok_or("neither VEKREL_HOME nor HOME is set")
+    };
+    let raw = match std::env::var_os("VEKREL_HOME") {
+        Some(v) => v.into_string().map_err(|_| "VEKREL_HOME is not UTF-8")?,
+        None => String::new(),
+    };
+    let raw = raw.trim();
+    let p = if raw.is_empty() {
+        home()?.join(".vekrel")
+    } else if raw == "~" {
+        home()?
+    } else if let Some(rest) = raw.strip_prefix("~/").or(raw.strip_prefix("~\\")) {
+        home()?.join(rest)
+    } else {
+        PathBuf::from(raw)
+    };
+    let abs = std::env::current_dir().map_or(p.clone(), |c| c.join(&p));
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    Ok(PathBuf::from(home.ok_or("neither VEKREL_HOME nor HOME is set")?).join(".vekrel"))
+    Ok(out)
 }
 
 #[cfg(unix)]

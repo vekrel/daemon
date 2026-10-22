@@ -1,6 +1,9 @@
 //! Observe-only middleware: verifies the engine's session credential on every request, records the
 //! outcome as a request extension and a warning, and never changes the request or the response.
-use super::{sessions::Store, token};
+use super::{
+    sessions::{SessionRow, Store},
+    token,
+};
 use axum::{
     Router,
     extract::Request,
@@ -36,7 +39,8 @@ pub struct ShadowAuth {
     pub outcome: Outcome,
 }
 
-struct Shadow {
+/// The engine's signing key and session DB, shared by shadow auth and Rust handlers.
+pub struct AuthFiles {
     key_path: PathBuf,
     db_path: PathBuf,
     // The engine creates both on first boot, possibly after us, so they load lazily and reload
@@ -59,12 +63,11 @@ fn file_id(p: &std::path::Path) -> Option<FileId> {
 
 /// Wraps every route of `router` (HTTP proxy and the `/ws` upgrade).
 pub fn apply(router: Router, key_path: PathBuf, db_path: PathBuf) -> Router {
-    let s = Arc::new(Shadow {
-        key_path,
-        db_path,
-        key: Mutex::new(None),
-        db: Mutex::new(None),
-    });
+    apply_shared(router, Arc::new(AuthFiles::new(key_path, db_path)))
+}
+
+/// `apply` over files the caller also hands to Rust handlers.
+pub fn apply_shared(router: Router, s: Arc<AuthFiles>) -> Router {
     router.layer(middleware::from_fn(move |mut req: Request, next: Next| {
         let s = s.clone();
         async move {
@@ -114,7 +117,16 @@ fn credentials(h: &HeaderMap) -> Vec<String> {
         .collect()
 }
 
-impl Shadow {
+impl AuthFiles {
+    pub fn new(key_path: PathBuf, db_path: PathBuf) -> Self {
+        AuthFiles {
+            key_path,
+            db_path,
+            key: Mutex::new(None),
+            db: Mutex::new(None),
+        }
+    }
+
     fn check(&self, creds: Vec<String>) -> Outcome {
         if creds.is_empty() {
             return Outcome::NoCredential;
@@ -134,7 +146,8 @@ impl Shadow {
         first.expect("creds is non-empty")
     }
 
-    fn key(&self) -> Option<[u8; 32]> {
+    /// The engine's 32-byte signing key; `None` until the engine has written it.
+    pub fn key(&self) -> Option<[u8; 32]> {
         let id = file_id(&self.key_path)?;
         let mut cached = self.key.lock().unwrap_or_else(|e| e.into_inner());
         match *cached {
@@ -161,32 +174,36 @@ impl Shadow {
         if p.exp <= now_ms {
             return Outcome::Expired;
         }
-        let Some(id) = file_id(&self.db_path) else {
-            return Outcome::DbUnavailable;
-        };
-        let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        if db.as_ref().is_none_or(|(cid, _)| *cid != id) {
-            *db = Store::open_readonly(&self.db_path).ok().map(|s| (id, s));
-        }
-        let Some((_, store)) = db.as_ref() else {
-            return Outcome::DbUnavailable;
-        };
-        match store.lookup(&p.sid) {
-            Ok(None) => Outcome::UnknownSession,
-            Ok(Some(row)) if row.revoked_at.is_some() => Outcome::Revoked,
+        match self.lookup(&p.sid) {
+            None => Outcome::DbUnavailable,
+            Some(None) => Outcome::UnknownSession,
+            Some(Some(row)) if row.revoked_at.is_some() => Outcome::Revoked,
             // Row scopes may narrow the token's, never widen them.
-            Ok(Some(row))
+            Some(Some(row))
                 if row.subject != p.sub
                     || row.method != p.method
                     || !row.scopes.iter().all(|s| p.scopes.contains(s)) =>
             {
                 Outcome::Mismatch
             }
-            Ok(Some(row)) if row.expires_at_ms <= now_ms => Outcome::Expired,
-            Ok(Some(row)) => Outcome::Verified { scopes: row.scopes },
+            Some(Some(row)) if row.expires_at_ms <= now_ms => Outcome::Expired,
+            Some(Some(row)) => Outcome::Verified { scopes: row.scopes },
+        }
+    }
+
+    /// The `auth_sessions` row for `sid`; `None` when the DB is missing or the read fails.
+    pub fn lookup(&self, sid: &str) -> Option<Option<SessionRow>> {
+        let id = file_id(&self.db_path)?;
+        let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if db.as_ref().is_none_or(|(cid, _)| *cid != id) {
+            *db = Store::open_readonly(&self.db_path).ok().map(|s| (id, s));
+        }
+        let (_, store) = db.as_ref()?;
+        match store.lookup(sid) {
+            Ok(r) => Some(r),
             Err(_) => {
                 *db = None; // reopen next time
-                Outcome::DbUnavailable
+                None
             }
         }
     }
@@ -203,7 +220,7 @@ mod tests {
     const K: [u8; 32] = [7; 32];
 
     /// A Shadow over a temp DB holding one row for `payload().sid`.
-    fn shadow(name: &str, subject: &str, scopes: &str, expires_at: &str) -> (Shadow, PathBuf) {
+    fn shadow(name: &str, subject: &str, scopes: &str, expires_at: &str) -> (AuthFiles, PathBuf) {
         let dir =
             std::env::temp_dir().join(format!("vekrel-shadow-unit-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -217,12 +234,7 @@ mod tests {
             [payload().sid.as_str(), subject, scopes, expires_at],
         )
         .unwrap();
-        let s = Shadow {
-            key_path: dir.join("server-signing-key.bin"),
-            db_path: db,
-            key: Mutex::new(None),
-            db: Mutex::new(None),
-        };
+        let s = AuthFiles::new(dir.join("server-signing-key.bin"), db);
         (s, dir)
     }
 

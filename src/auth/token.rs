@@ -38,9 +38,7 @@ pub fn verify(token: &str, key: &[u8; 32]) -> Result<Payload, TokenError> {
         (Some(e), Some(s)) if !e.is_empty() && !s.is_empty() => (e, s),
         _ => return Err(TokenError::Malformed),
     };
-    let sig = B64
-        .decode(sig.trim_end_matches('='))
-        .map_err(|_| TokenError::BadSignature)?;
+    let sig = node_base64_decode(sig);
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key length");
     mac.update(enc.as_bytes());
     mac.verify_slice(&sig)
@@ -53,6 +51,32 @@ pub fn verify(token: &str, key: &[u8; 32]) -> Result<Payload, TokenError> {
         return Err(TokenError::Malformed);
     }
     Ok(p)
+}
+
+/// `Buffer.from(s, "base64url")` as `timingSafeEqualBase64Url` uses it: both alphabets, other
+/// characters skipped, stops at `=`, leftover bits dropped. A strict decoder would reject
+/// signatures Node accepts (e.g. a changed final character that only flips unused bits).
+fn node_base64_decode(s: &str) -> Vec<u8> {
+    let (mut out, mut acc, mut bits) = (Vec::new(), 0u32, 0);
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            _ => continue,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -109,6 +133,45 @@ pub(crate) mod tests {
             Err(TokenError::BadSignature)
         );
     }
+
+    #[test]
+    fn signature_decodes_like_node_buffer() {
+        // Expected values from `Buffer.from(s, "base64url").toString("hex")` on Node 22.
+        let hex = |s: &str| {
+            node_base64_decode(s)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        for (s, want) in [
+            ("AQ", "01"),
+            ("AR", "01"),
+            ("AQ==", "01"),
+            ("A!Q", "01"),
+            ("A Q", "01"),
+            ("+/", "fb"),
+            ("-_", "fb"),
+            ("AQ=AQ", "01"),
+            ("AQID", "010203"),
+            ("A=QID", ""),
+        ] {
+            assert_eq!(hex(s), want, "{s}");
+        }
+    }
+
+    #[test]
+    fn signature_with_flipped_unused_bits_verifies_as_in_node() {
+        let t = mint(&payload(), &K);
+        // 32-byte MAC = 43 chars; the last one carries 2 unused bits.
+        let last = t.chars().last().unwrap();
+        let idx = B64_ALPHABET.find(last).unwrap();
+        let flipped = B64_ALPHABET.as_bytes()[idx ^ 1] as char;
+        let forged = format!("{}{flipped}", &t[..t.len() - 1]);
+        assert_ne!(forged, t);
+        assert!(verify(&forged, &K).is_ok());
+    }
+
+    const B64_ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     #[test]
     fn missing_dot_is_malformed() {

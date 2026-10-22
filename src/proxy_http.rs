@@ -1,4 +1,4 @@
-use crate::server::Upstream;
+use crate::{config::Mode, http_seam, server::Upstream};
 use axum::{
     body::Body,
     extract::{ConnectInfo, Request, State},
@@ -97,6 +97,25 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     );
     add_forwarded(h, client_host, upstream.public_port, ip);
 
+    // Handlers see the request exactly as Node would (rewritten Host, X-Forwarded-*).
+    let path = req.uri().path().to_owned();
+    let Some((mode, h)) = upstream.seam.find(req.method(), &path) else {
+        return forward(&upstream, req).await;
+    };
+    let (parts, body) = req.into_parts();
+    let rust = h.handle(&parts, &upstream.seam.ctx).await;
+    let req = Request::from_parts(parts, body);
+    match (mode, rust) {
+        (Mode::Serve, Some(r)) => http_seam::served(r),
+        (Mode::Shadow, Some(r)) => {
+            let route = http_seam::key(h);
+            http_seam::tee(forward(&upstream, req).await, r, &route).await
+        }
+        _ => forward(&upstream, req).await,
+    }
+}
+
+async fn forward(upstream: &Upstream, req: Request<Body>) -> Response<Body> {
     match tokio::time::timeout(Duration::from_secs(30), upstream.client.request(req)).await {
         Err(_) => error(StatusCode::GATEWAY_TIMEOUT, "engine_timeout"),
         Ok(Err(e)) => {

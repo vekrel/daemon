@@ -1,4 +1,5 @@
 use crate::{
+    http_seam::Seam,
     proxy_http,
     proxy_ws::{self, FrameTap, NoTap},
     supervisor::State,
@@ -24,6 +25,8 @@ pub struct Upstream {
     pub client: Client<HttpConnector, Body>,
     /// Bound on the WS handshake with the engine.
     pub dial_timeout: Duration,
+    /// Routes Rust shadows or serves; empty means everything goes to the engine.
+    pub seam: Arc<Seam>,
 }
 
 impl Upstream {
@@ -37,6 +40,11 @@ impl Upstream {
         self
     }
 
+    pub fn with_seam(mut self, seam: Seam) -> Self {
+        self.seam = Arc::new(seam);
+        self
+    }
+
     pub fn loopback(port: u16) -> Self {
         let client = Client::builder(TokioExecutor::new()).build_http();
         Self {
@@ -45,6 +53,7 @@ impl Upstream {
             public_port: 0,
             client,
             dial_timeout: Duration::from_secs(10),
+            seam: Arc::default(),
         }
     }
 }

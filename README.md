@@ -20,7 +20,11 @@ port = 3773        # public port
 command = "node"
 args = ["/abs/path/apps/server/dist/bin.mjs"]
 # port = 3783      # loopback only; defaults to server.port + 10
+[rust.handlers]    # optional; every handler defaults to "shadow"
+"GET /api/auth/session" = "shadow"   # off | shadow | serve
 ```
+
+Rust handlers: in `shadow` the engine answers, and the daemon compares its own answer (status, `content-type`, body bytes; bodies over 1 MiB are skipped) and logs `rust shadow` with `outcome="match"` or `outcome="mismatch"` plus the first differing JSON path (never values). In `serve` the daemon answers with `x-vekrel-served-by: rust` and the engine never sees the request. Requests a handler cannot answer exactly (legacy cookie, DPoP proof, unreadable key or DB) always go to the engine.
 
 ## Run
 

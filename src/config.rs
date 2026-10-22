@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct EngineConfig {
@@ -21,6 +21,34 @@ pub struct ServerConfig {
 pub struct Config {
     pub server: ServerConfig,
     pub engine: EngineConfig,
+    #[serde(default)]
+    pub rust: RustConfig,
+}
+
+/// `[rust.handlers]`: per-handler mode keyed by `"METHOD /path"` (HTTP) or RPC tag.
+#[derive(Debug, Deserialize, Default)]
+pub struct RustConfig {
+    #[serde(default)]
+    pub handlers: HashMap<String, Mode>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Node answers; Rust is not consulted.
+    Off,
+    /// Node answers; Rust computes its answer too and logs whether they match.
+    #[default]
+    Shadow,
+    /// Rust answers; Node never sees the request.
+    Serve,
+}
+
+impl RustConfig {
+    /// Every handler defaults to `shadow`.
+    pub fn mode(&self, key: &str) -> Mode {
+        self.handlers.get(key).copied().unwrap_or_default()
+    }
 }
 
 impl Config {
@@ -72,6 +100,23 @@ mod tests {
         assert_eq!(c.engine_port().unwrap(), 3789);
         let c = parse("[server]\nport = 3779\n[engine]\ncommand = \"x\"\nport = 5000\n");
         assert_eq!(c.engine_port().unwrap(), 5000);
+    }
+
+    #[test]
+    fn handler_modes_default_to_shadow() {
+        let c = parse("[server]\nport = 1\n[engine]\ncommand = \"x\"\n");
+        assert_eq!(c.rust.mode("GET /api/auth/session"), Mode::Shadow);
+        let c = parse(
+            "[server]\nport = 1\n[engine]\ncommand = \"x\"\n[rust.handlers]\n\"GET /api/auth/session\" = \"serve\"\n\"x\" = \"off\"\n",
+        );
+        assert_eq!(c.rust.mode("GET /api/auth/session"), Mode::Serve);
+        assert_eq!(c.rust.mode("x"), Mode::Off);
+        assert!(
+            toml::from_str::<Config>(
+                "[server]\nport = 1\n[engine]\ncommand = \"x\"\n[rust.handlers]\na = \"on\"\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]
