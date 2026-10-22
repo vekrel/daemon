@@ -1,0 +1,16 @@
+use crate::supervisor::State;
+use axum::{Json, Router, extract::State as AxState, routing::get};
+use serde_json::{Value, json};
+use std::sync::{Arc, atomic::Ordering};
+
+pub fn router(state: Arc<State>) -> Router {
+    Router::new().route("/healthz", get(healthz)).with_state(state)
+}
+
+async fn healthz(AxState(s): AxState<Arc<State>>) -> Json<Value> {
+    let up = s.engine_up.load(Ordering::SeqCst);
+    Json(json!({
+        "engine": if up { "up" } else { "down" },
+        "restarts": s.restarts.load(Ordering::SeqCst),
+    }))
+}
