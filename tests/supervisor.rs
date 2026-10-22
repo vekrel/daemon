@@ -4,6 +4,9 @@ use std::time::Duration;
 struct Guard(Child);
 impl Drop for Guard {
     fn drop(&mut self) {
+        // SIGTERM so vekreld reaps its engine child; SIGKILL would orphan it.
+        let _ = Command::new("kill").args(["-TERM", &self.0.id().to_string()]).status();
+        std::thread::sleep(Duration::from_millis(200));
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -81,4 +84,24 @@ async fn running_engine_reports_up() {
     let (_g, port) = start("up", "sleep", &["30"]);
     let seen = poll(port, Duration::from_secs(1), |h| h.0 == "up").await;
     assert_eq!(seen.last(), Some(&("up".to_string(), 0)), "{seen:?}");
+}
+
+#[tokio::test]
+async fn sigterm_stops_engine_child() {
+    let marker = format!("3{}", std::process::id()); // unique sleep arg to find the child
+    let (mut g, port) = start("sigterm", "sleep", &[&marker]);
+    let seen = poll(port, Duration::from_secs(2), |h| h.0 == "up").await;
+    assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
+    let pattern = format!("sleep {marker}");
+    let found = || Command::new("pgrep").args(["-f", &pattern]).output().unwrap().status.success();
+    assert!(found(), "engine child not running");
+    Command::new("kill").args(["-TERM", &g.0.id().to_string()]).status().unwrap();
+    let end = tokio::time::Instant::now() + Duration::from_secs(3);
+    while g.0.try_wait().unwrap().is_none() {
+        assert!(tokio::time::Instant::now() < end, "vekreld did not exit");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(g.0.try_wait().unwrap().unwrap().success());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!found(), "engine child orphaned");
 }

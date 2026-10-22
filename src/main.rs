@@ -27,6 +27,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(supervisor::State::default());
     tokio::spawn(supervisor::run(cfg.engine, state.clone()));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.daemon.health_port)).await?;
-    axum::serve(listener, health::router(state)).await?;
+    // Returning drops the runtime, which drops the supervisor's child (kill_on_drop).
+    tokio::select! {
+        r = axum::serve(listener, health::router(state)) => r?,
+        _ = shutdown_signal() => tracing::info!("shutting down"),
+    }
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
 }
