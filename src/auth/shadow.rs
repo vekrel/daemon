@@ -9,7 +9,7 @@ use axum::{
 };
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -39,9 +39,22 @@ pub struct ShadowAuth {
 struct Shadow {
     key_path: PathBuf,
     db_path: PathBuf,
-    // The engine creates both on first boot, possibly after us, so they load lazily.
-    key: OnceLock<[u8; 32]>,
-    db: Mutex<Option<Store>>,
+    // The engine creates both on first boot, possibly after us, so they load lazily and reload
+    // when the file changes (key rotated, DB replaced).
+    key: Mutex<Option<(FileId, [u8; 32])>>,
+    db: Mutex<Option<(FileId, Store)>>,
+}
+
+/// Inode (unix) and mtime: changes when the file is rewritten or replaced.
+type FileId = (u64, Option<SystemTime>);
+
+fn file_id(p: &std::path::Path) -> Option<FileId> {
+    let m = std::fs::metadata(p).ok()?;
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&m);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some((ino, m.modified().ok()))
 }
 
 /// Wraps every route of `router` (HTTP proxy and the `/ws` upgrade).
@@ -49,17 +62,29 @@ pub fn apply(router: Router, key_path: PathBuf, db_path: PathBuf) -> Router {
     let s = Arc::new(Shadow {
         key_path,
         db_path,
-        key: OnceLock::new(),
+        key: Mutex::new(None),
         db: Mutex::new(None),
     });
     router.layer(middleware::from_fn(move |mut req: Request, next: Next| {
         let s = s.clone();
         async move {
-            let outcome = s.check(req.headers());
-            if !matches!(outcome, Outcome::Verified { .. } | Outcome::NoCredential) {
-                tracing::warn!(path = %req.uri().path(), outcome = ?outcome, "shadow auth");
+            let creds = credentials(req.headers());
+            // File and SQLite I/O (busy timeout included) must not block a runtime worker.
+            let outcome = if creds.is_empty() {
+                Ok(Outcome::NoCredential)
+            } else {
+                tokio::task::spawn_blocking(move || s.check(creds)).await
+            };
+            match outcome {
+                Ok(outcome) => {
+                    if !matches!(outcome, Outcome::Verified { .. } | Outcome::NoCredential) {
+                        tracing::warn!(path = %req.uri().path(), outcome = ?outcome, "shadow auth");
+                    }
+                    req.extensions_mut().insert(ShadowAuth { outcome });
+                }
+                // Observe only: a failed check never affects the request.
+                Err(e) => tracing::warn!(path = %req.uri().path(), "shadow auth check failed: {e}"),
             }
-            req.extensions_mut().insert(ShadowAuth { outcome });
             next.run(req).await
         }
     }))
@@ -67,7 +92,7 @@ pub fn apply(router: Router, key_path: PathBuf, db_path: PathBuf) -> Router {
 
 /// Session cookies (`t3_session`, `t3_session_<port>[_<hash12>]`, `t3_session_<hash12>`, see the
 /// engine's `auth/utils.ts`) and `Authorization: Bearer|DPoP` tokens.
-fn credentials(h: &HeaderMap) -> Vec<&str> {
+fn credentials(h: &HeaderMap) -> Vec<String> {
     let cookies = h
         .get_all(header::COOKIE)
         .iter()
@@ -82,12 +107,15 @@ fn credentials(h: &HeaderMap) -> Vec<&str> {
         .filter_map(|v| v.to_str().ok()?.split_once(' '))
         .filter(|(s, _)| s.eq_ignore_ascii_case("bearer") || s.eq_ignore_ascii_case("dpop"))
         .map(|(_, t)| t.trim());
-    cookies.chain(auth).filter(|t| !t.is_empty()).collect()
+    cookies
+        .chain(auth)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 impl Shadow {
-    fn check(&self, h: &HeaderMap) -> Outcome {
-        let creds = credentials(h);
+    fn check(&self, creds: Vec<String>) -> Outcome {
         if creds.is_empty() {
             return Outcome::NoCredential;
         }
@@ -97,7 +125,7 @@ impl Shadow {
         // Browsers send every server's cookie on a host (cookies ignore ports), so one match wins.
         let mut first = None;
         for t in creds {
-            let o = self.verify(t, &key);
+            let o = self.verify(&t, &key);
             if matches!(o, Outcome::Verified { .. }) {
                 return o;
             }
@@ -107,11 +135,16 @@ impl Shadow {
     }
 
     fn key(&self) -> Option<[u8; 32]> {
-        if let Some(k) = self.key.get() {
-            return Some(*k);
+        let id = file_id(&self.key_path)?;
+        let mut cached = self.key.lock().unwrap_or_else(|e| e.into_inner());
+        match *cached {
+            Some((cid, k)) if cid == id => Some(k),
+            _ => {
+                let k: [u8; 32] = std::fs::read(&self.key_path).ok()?.try_into().ok()?;
+                *cached = Some((id, k));
+                Some(k)
+            }
         }
-        let k: [u8; 32] = std::fs::read(&self.key_path).ok()?.try_into().ok()?;
-        Some(*self.key.get_or_init(|| k))
     }
 
     /// The engine's `SessionStore.verify` order, then the row is the source of truth: row expiry
@@ -128,11 +161,14 @@ impl Shadow {
         if p.exp <= now_ms {
             return Outcome::Expired;
         }
+        let Some(id) = file_id(&self.db_path) else {
+            return Outcome::DbUnavailable;
+        };
         let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        if db.is_none() {
-            *db = Store::open_readonly(&self.db_path).ok();
+        if db.as_ref().is_none_or(|(cid, _)| *cid != id) {
+            *db = Store::open_readonly(&self.db_path).ok().map(|s| (id, s));
         }
-        let Some(store) = db.as_ref() else {
+        let Some((_, store)) = db.as_ref() else {
             return Outcome::DbUnavailable;
         };
         match store.lookup(&p.sid) {
@@ -182,9 +218,9 @@ mod tests {
         )
         .unwrap();
         let s = Shadow {
-            key_path: dir.join("unused"),
+            key_path: dir.join("server-signing-key.bin"),
             db_path: db,
-            key: OnceLock::new(),
+            key: Mutex::new(None),
             db: Mutex::new(None),
         };
         (s, dir)
@@ -244,6 +280,57 @@ mod tests {
                 scopes: vec!["orchestration:read".into()]
             }
         );
+    }
+
+    #[test]
+    fn row_has_scope_token_lacks_is_mismatch() {
+        let o = check(
+            "widen",
+            "browser",
+            r#"["orchestration:read","admin"]"#,
+            "2099-01-01T00:00:00.000Z",
+        );
+        assert_eq!(o, Outcome::Mismatch);
+    }
+
+    #[test]
+    fn method_mismatch_is_mismatch() {
+        let (s, dir) = shadow(
+            "method",
+            "browser",
+            r#"["orchestration:read"]"#,
+            "2099-01-01T00:00:00.000Z",
+        );
+        let mut p = payload();
+        p.method = "bearer-access-token".into();
+        let o = s.verify(&mint(&p, &K), &K);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(o, Outcome::Mismatch);
+    }
+
+    #[test]
+    fn key_is_reread_when_its_mtime_changes() {
+        let (s, dir) = shadow(
+            "rekey",
+            "browser",
+            r#"["orchestration:read"]"#,
+            "2099-01-01T00:00:00.000Z",
+        );
+        let set = |k: [u8; 32], t: u64| {
+            std::fs::write(&s.key_path, k).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&s.key_path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(t))
+                .unwrap();
+        };
+        set([1; 32], 1_000);
+        assert_eq!(s.key(), Some([1; 32]));
+        set(K, 2_000);
+        let t = mint(&payload(), &K);
+        assert!(matches!(s.check(vec![t]), Outcome::Verified { .. }));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
