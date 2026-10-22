@@ -103,16 +103,17 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         return forward(&upstream, req).await;
     };
     let (parts, body) = req.into_parts();
-    let rust = h.handle(&parts, &upstream.seam.ctx).await;
-    let req = Request::from_parts(parts, body);
-    match (mode, rust) {
-        (Mode::Serve, Some(r)) => http_seam::served(r),
-        (Mode::Shadow, Some(r)) => {
-            let route = http_seam::key(h);
-            http_seam::tee(forward(&upstream, req).await, r, &route).await
-        }
-        _ => forward(&upstream, req).await,
+    if mode == Mode::Serve {
+        return match h.handle(&parts, &upstream.seam.ctx).await {
+            Some(r) => http_seam::served(r),
+            None => forward(&upstream, Request::from_parts(parts, body)).await,
+        };
     }
+    // Shadow: Rust runs beside Node and never delays Node's answer.
+    let (seam, rust_parts, route) = (upstream.seam.clone(), parts.clone(), http_seam::key(&*h));
+    let rust = tokio::spawn(async move { h.handle(&rust_parts, &seam.ctx).await });
+    let node = forward(&upstream, Request::from_parts(parts, body)).await;
+    http_seam::tee(node, rust, route)
 }
 
 async fn forward(upstream: &Upstream, req: Request<Body>) -> Response<Body> {

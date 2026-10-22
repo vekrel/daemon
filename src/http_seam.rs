@@ -5,9 +5,14 @@ use axum::{
     body::{Body, Bytes, HttpBody},
     http::{HeaderValue, Method, Response, header, request::Parts},
 };
-use futures_util::future::BoxFuture;
+use futures_util::{Stream, future::BoxFuture};
 use serde_json::Value;
-use std::sync::Arc;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
+use tokio::{sync::oneshot, task::JoinHandle};
 
 pub trait RouteHandler: Send + Sync {
     fn method_path(&self) -> (Method, &'static str);
@@ -56,10 +61,10 @@ impl Seam {
         self
     }
 
-    pub(crate) fn find(&self, m: &Method, path: &str) -> Option<(Mode, &dyn RouteHandler)> {
+    pub(crate) fn find(&self, m: &Method, path: &str) -> Option<(Mode, Arc<dyn RouteHandler>)> {
         self.routes.iter().find_map(|(mode, h)| {
             let (hm, hp) = h.method_path();
-            (hm == m && hp == path).then_some((*mode, &**h))
+            (hm == m && hp == path).then(|| (*mode, h.clone()))
         })
     }
 }
@@ -71,11 +76,13 @@ pub(crate) fn served(r: Response<Bytes>) -> Response<Body> {
     r
 }
 
-/// Buffers Node's response (if small enough), compares it with Rust's, logs, and returns Node's.
-pub(crate) async fn tee(
+/// Returns Node's response at once and streams its body through unchanged (errors included),
+/// keeping a copy; once both the body and Rust's answer (`rust`, already running) are done, a
+/// detached task compares and logs. Nothing here waits on Rust.
+pub(crate) fn tee(
     node: Response<Body>,
-    rust: Response<Bytes>,
-    route: &str,
+    rust: JoinHandle<Option<Response<Bytes>>>,
+    route: String,
 ) -> Response<Body> {
     let (parts, body) = node.into_parts();
     // shortcut: a body without a known length (chunked) is skipped too; Node sends lengths for JSON.
@@ -83,33 +90,77 @@ pub(crate) async fn tee(
         tracing::info!(route, outcome = "skipped_large", "rust shadow");
         return Response::from_parts(parts, body);
     }
-    let bytes = match axum::body::to_bytes(body, TEE_LIMIT as usize).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("engine response failed: {e}");
-            return crate::proxy_http::error(
-                axum::http::StatusCode::BAD_GATEWAY,
-                "engine_unreachable",
-            );
+    let (tx, rx) = oneshot::channel();
+    let (status, ct) = (
+        parts.status,
+        parts.headers.get(header::CONTENT_TYPE).cloned(),
+    );
+    tokio::spawn(async move {
+        // A handler that declines, panics, or a body that failed / was abandoned: nothing to compare.
+        let (Ok(Some(rust)), Ok(bytes)) = (rust.await, rx.await) else {
+            return;
+        };
+        let bytes: Bytes = bytes;
+        let diff = if status != rust.status() {
+            Some(("status", "$".to_owned()))
+        } else if ct.as_ref() != rust.headers().get(header::CONTENT_TYPE) {
+            Some(("content-type", "$".to_owned()))
+        } else if bytes != rust.body() {
+            Some(("body", json_path(&bytes, rust.body())))
+        } else {
+            None
+        };
+        match diff {
+            None => tracing::info!(route, outcome = "match", "rust shadow"),
+            Some((field, path)) => {
+                tracing::warn!(route, outcome = "mismatch", field, path, "rust shadow")
+            }
         }
+    });
+    let tee = Tee {
+        len: body.size_hint().exact(),
+        inner: body.into_data_stream(),
+        buf: Vec::new(),
+        tx: Some(tx),
     };
-    let ct = |h: &axum::http::HeaderMap| h.get(header::CONTENT_TYPE).cloned();
-    let diff = if parts.status != rust.status() {
-        Some(("status", "$".to_owned()))
-    } else if ct(&parts.headers) != ct(rust.headers()) {
-        Some(("content-type", "$".to_owned()))
-    } else if bytes != rust.body() {
-        Some(("body", json_path(&bytes, rust.body())))
-    } else {
-        None
-    };
-    match diff {
-        None => tracing::info!(route, outcome = "match", "rust shadow"),
-        Some((field, path)) => {
-            tracing::warn!(route, outcome = "mismatch", field, path, "rust shadow")
+    Response::from_parts(parts, Body::from_stream(tee))
+}
+
+/// Passes `inner` through and sends a copy of the whole body on clean end.
+struct Tee<S> {
+    /// hyper stops polling once it has written content-length bytes, so the end may never be seen.
+    len: Option<u64>,
+    inner: S,
+    buf: Vec<u8>,
+    tx: Option<oneshot::Sender<Bytes>>,
+}
+
+impl<S> Tee<S> {
+    fn finish(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(std::mem::take(&mut self.buf).into());
         }
     }
-    Response::from_parts(parts, Body::from(bytes))
+}
+
+impl<S: Stream<Item = Result<Bytes, axum::Error>> + Unpin> Stream for Tee<S> {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let p = Pin::new(&mut self.inner).poll_next(cx);
+        match &p {
+            Poll::Ready(Some(Ok(b))) => {
+                self.buf.extend_from_slice(b);
+                if self.len == Some(self.buf.len() as u64) {
+                    self.finish();
+                }
+            }
+            Poll::Ready(Some(Err(_))) => self.tx = None,
+            Poll::Ready(None) => self.finish(),
+            Poll::Pending => {}
+        }
+        p
+    }
 }
 
 /// The first JSON path where `node` and `rust` differ (keys and indexes only, never values).

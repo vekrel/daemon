@@ -390,6 +390,28 @@ impl Logs {
             .map(String::from)
             .collect()
     }
+
+    /// The comparison runs after the response, so wait for it (up to 5 s).
+    async fn wait(&self, n: usize) -> Vec<String> {
+        for _ in 0..100 {
+            if self.lines().len() >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        self.lines()
+    }
+}
+
+fn capture() -> (Logs, tracing::subscriber::DefaultGuard) {
+    let logs = Logs::default();
+    let l = logs.clone();
+    let sub = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || l.clone())
+        .finish();
+    // Tests run on current-thread runtimes, so spawned tasks log on this thread.
+    (logs, tracing::subscriber::set_default(sub))
 }
 
 /// Fake engine answering every request with `status`/`body` as JSON; counts hits.
@@ -414,7 +436,11 @@ async fn engine(status: u16, body: String) -> (u16, Arc<AtomicUsize>) {
 }
 
 async fn proxy(up: u16, mode: Mode, desc: Descriptor, files: Arc<AuthFiles>) -> String {
-    let seam = Seam::new(HandlerCtx::default()).with(mode, Arc::new(AuthSession::new(desc, files)));
+    proxy_with(up, mode, Arc::new(AuthSession::new(desc, files))).await
+}
+
+async fn proxy_with(up: u16, mode: Mode, h: Arc<dyn RouteHandler>) -> String {
+    let seam = Seam::new(HandlerCtx::default()).with(mode, h);
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = server::build(
@@ -484,13 +510,7 @@ async fn legacy_cookie_goes_to_node_in_serve_mode() {
 
 #[tokio::test]
 async fn shadow_compares_http_bytes() {
-    let logs = Logs::default();
-    let l = logs.clone();
-    let sub = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(move || l.clone())
-        .finish();
-    let _g = tracing::subscriber::set_default(sub);
+    let (logs, _g) = capture();
     let e = Env::ok("shadow");
 
     // Node's bytes equal Rust's: the client gets Node's, the log says match.
@@ -500,7 +520,7 @@ async fn shadow_compares_http_bytes() {
     assert_eq!((s, b), (200, unauth()));
     assert!(h.get("x-vekrel-served-by").is_none());
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    let lines = logs.lines();
+    let lines = logs.wait(1).await;
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
         lines[0].contains("match") && !lines[0].contains("mismatch"),
@@ -512,7 +532,7 @@ async fn shadow_compares_http_bytes() {
     let (up, _) = engine(200, node.clone()).await;
     let url = proxy(up, Mode::Shadow, desc(), e.files.clone()).await;
     assert_eq!(get(&url, &[]).await.2, node);
-    let lines = logs.lines();
+    let lines = logs.wait(2).await;
     assert!(
         lines[1].contains("mismatch") && lines[1].contains("$.auth.sessionCookieName"),
         "{lines:?}"
@@ -523,7 +543,7 @@ async fn shadow_compares_http_bytes() {
     let (up, _) = engine(500, unauth()).await;
     let url = proxy(up, Mode::Shadow, desc(), e.files.clone()).await;
     assert_eq!(get(&url, &[]).await.0, 500);
-    let lines = logs.lines();
+    let lines = logs.wait(3).await;
     assert!(
         lines[2].contains("mismatch") && lines[2].contains("status"),
         "{lines:?}"
@@ -534,7 +554,7 @@ async fn shadow_compares_http_bytes() {
     let (up, _) = engine(200, big.clone()).await;
     let url = proxy(up, Mode::Shadow, desc(), e.files.clone()).await;
     assert_eq!(get(&url, &[]).await.2.len(), big.len());
-    let lines = logs.lines();
+    let lines = logs.wait(4).await;
     assert!(lines[3].contains("skipped_large"), "{lines:?}");
 }
 
@@ -547,4 +567,74 @@ async fn off_mode_and_other_routes_go_to_node() {
     let url = proxy(up, Mode::Serve, desc(), e.files.clone()).await;
     assert_eq!(get(&url.replace("session", "other"), &[]).await.2, "node");
     assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+/// Answers like Node would, but only after 2 s.
+struct Slow;
+impl RouteHandler for Slow {
+    fn method_path(&self) -> (axum::http::Method, &'static str) {
+        (axum::http::Method::GET, "/api/auth/session")
+    }
+    fn handle<'a>(
+        &'a self,
+        _: &'a axum::http::request::Parts,
+        _: &'a HandlerCtx,
+    ) -> futures_util::future::BoxFuture<'a, Option<Response<axum::body::Bytes>>> {
+        Box::pin(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            Some(
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(unauth().into())
+                    .unwrap(),
+            )
+        })
+    }
+}
+
+#[tokio::test]
+async fn shadow_never_waits_for_rust() {
+    let (logs, _g) = capture();
+    let (up, _) = engine(200, unauth()).await;
+    let url = proxy_with(up, Mode::Shadow, Arc::new(Slow)).await;
+    let t = std::time::Instant::now();
+    let (s, _, b) = get(&url, &[]).await;
+    let took = t.elapsed();
+    assert_eq!((s, b), (200, unauth()));
+    assert!(
+        took < std::time::Duration::from_millis(300),
+        "took {took:?}"
+    );
+    assert!(logs.lines().is_empty(), "compared before Rust finished?");
+    let lines = logs.wait(1).await;
+    assert!(
+        lines.len() == 1 && lines[0].contains("\"match\""),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn shadow_passes_node_body_errors_through() {
+    let (logs, _g) = capture();
+    // An engine that promises 100 bytes, sends 3, and hangs up.
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut c, _) = l.accept().await.unwrap();
+        let mut buf = vec![0; 4096];
+        let _ = c.read(&mut buf).await;
+        c.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\nabc",
+        )
+        .await
+        .unwrap();
+    });
+    let e = Env::ok("bodyerr");
+    let url = proxy(up, Mode::Shadow, desc(), e.files.clone()).await;
+    let r = reqwest::get(&url).await.unwrap();
+    assert_eq!(r.status(), 200, "Node's status, not a 502");
+    assert!(r.text().await.is_err(), "the body error reaches the client");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(logs.lines().is_empty(), "no comparison on a broken body");
 }

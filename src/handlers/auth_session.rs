@@ -418,10 +418,16 @@ fn iso_millis(ms: i64) -> String {
 
 /// Why Rust cannot reproduce the engine's auth descriptor for this engine config, if it cannot:
 /// `Descriptor::web` assumes web mode, the loopback host the supervisor sets, no dev URL or dev
-/// auth, and the default base dir.
+/// auth, the default base dir, and no bootstrap fd.
 pub fn unsupported_engine(args: &[String], env: impl Fn(&str) -> Option<String>) -> Option<String> {
     for a in args {
-        for f in ["--mode", "--host", "--dev-url", "--base-dir"] {
+        for f in [
+            "--mode",
+            "--host",
+            "--dev-url",
+            "--base-dir",
+            "--bootstrap-fd",
+        ] {
             if a == f || a.starts_with(&format!("{f}=")) {
                 return Some(format!("engine arg {f}"));
             }
@@ -430,7 +436,9 @@ pub fn unsupported_engine(args: &[String], env: impl Fn(&str) -> Option<String>)
     if env("VEKREL_MODE").is_some_and(|m| m != "web") {
         return Some("VEKREL_MODE".into());
     }
+    // The bootstrap payload on that fd can set mode and base dir.
     for v in [
+        "VEKREL_BOOTSTRAP_FD",
         "VITE_DEV_SERVER_URL",
         "VEKREL_DEV_AUTH_TOKEN",
         "VEKREL_DEV_ALLOWED_ORIGINS",
@@ -497,6 +505,9 @@ mod tests {
         assert_eq!(unsupported_engine(&["bin.mjs".into()], none), None);
         assert!(unsupported_engine(&["--host=0.0.0.0".into()], none).is_some());
         assert!(unsupported_engine(&["--mode".into(), "desktop".into()], none).is_some());
+        assert!(unsupported_engine(&["--bootstrap-fd=3".into()], none).is_some());
+        let fd = |k: &str| (k == "VEKREL_BOOTSTRAP_FD").then(|| "3".to_owned());
+        assert!(unsupported_engine(&[], fd).is_some());
         let dev = |k: &str| (k == "VITE_DEV_SERVER_URL").then(|| "http://x".to_owned());
         assert!(unsupported_engine(&[], dev).is_some());
         let web = |k: &str| (k == "VEKREL_MODE").then(|| "web".to_owned());
