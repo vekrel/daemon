@@ -35,17 +35,22 @@ impl UnaryHandler for ReadFile {
         async move {
             let r =
                 tokio::task::spawn_blocking(move || read_file(&payload, &proc_cwd, &home)).await;
-            Some(r.expect("read_file does not panic"))
+            r.ok().flatten()
         }
         .boxed()
     }
 }
 
 /// The handler body. `proc_cwd` is the engine's `process.cwd()`, `home` its `os.homedir()`.
-pub fn read_file(payload: &Value, proc_cwd: &str, home: &str) -> Result<Value, Value> {
+/// `None` (decline, Node answers) for what Rust cannot answer byte for byte: a payload Node
+/// fails to decode (Node sends a `Die` with the schema error text) and an OS error outside the
+/// `errno` table or without an errno.
+pub fn read_file(payload: &Value, proc_cwd: &str, home: &str) -> Option<Result<Value, Value>> {
     let input = decode(payload)?;
-    let target = resolve_target(&input, proc_cwd, home).map_err(|f| error(&input, f))?;
-    read_target(&input, target).map_err(|f| error(&input, f))
+    match resolve_target(&input, proc_cwd, home).and_then(|t| read_target(&input, t)) {
+        Err(Fail::Unmapped) => None,
+        r => Some(r.map_err(|f| error(&input, f))),
+    }
 }
 
 /// The decoded `ProjectReadFileInput` (strings trimmed, as `TrimmedNonEmptyString` decodes).
@@ -55,24 +60,22 @@ struct Input {
     allow_missing: bool,
 }
 
-/// shortcut: Node answers an undecodable payload with a `Die` carrying the schema error text;
-/// the seam can only send `Fail`, so this differs from Node for malformed clients only.
-fn decode(p: &Value) -> Result<Input, Value> {
-    let bad = |m: &str| json!({"_tag": "ProjectReadFileError", "message": m});
-    let text = |k: &str| match p.get(k).and_then(Value::as_str).map(js_trim) {
-        Some(s) if !s.is_empty() => Ok(s.to_owned()),
-        _ => Err(bad(&format!("invalid {k}"))),
+/// `None` where Node's `ProjectReadFileInput` decode fails.
+fn decode(p: &Value) -> Option<Input> {
+    let text = |k: &str| {
+        let s = js_trim(p.get(k)?.as_str()?);
+        (!s.is_empty()).then(|| s.to_owned())
     };
     let (cwd, rel) = (text("cwd")?, text("relativePath")?);
     if rel.encode_utf16().count() > PATH_MAX_LENGTH {
-        return Err(bad("invalid relativePath"));
+        return None;
     }
     let allow_missing = match p.get("allowMissing") {
         None => false,
         Some(Value::Bool(b)) => *b,
-        Some(_) => return Err(bad("invalid allowMissing")),
+        Some(_) => return None,
     };
-    Ok(Input {
+    Some(Input {
         cwd,
         rel,
         allow_missing,
@@ -88,6 +91,8 @@ enum Fail {
     },
     NotFile(String),
     Binary(String),
+    /// An OS error Rust cannot spell as Node does (unmapped errno, or no errno at all).
+    Unmapped,
     Op {
         op: &'static str,
         resolved: String,
@@ -148,7 +153,8 @@ fn resolve_target(i: &Input, proc_cwd: &str, home: &str) -> Result<Target, Fail>
 
     // `resolveRelativePathWithinRoot`.
     let target_abs = resolve(proc_cwd, &[&i.cwd, requested]);
-    let rel = relative(proc_cwd, &i.cwd, &target_abs);
+    // `toPosixRelativePath`: the checks and the result see `\` as `/`; the read uses `target_abs`.
+    let rel = relative(proc_cwd, &i.cwd, &target_abs).replace('\\', "/");
     if rel.is_empty() || rel == "." || rel == ".." || rel.starts_with("../") || rel.starts_with('/')
     {
         return Err(Fail::OutsideRoot);
@@ -257,7 +263,9 @@ fn op(
     syscall: &str,
     path: Option<&str>,
 ) -> Fail {
-    let (code, desc) = errno(e);
+    let Some((code, desc)) = errno(e) else {
+        return Fail::Unmapped;
+    };
     let cause = match path {
         Some(p) => format!("{code}: {desc}, {syscall} '{p}'"),
         None => format!("{code}: {desc}, {syscall}"),
@@ -280,6 +288,7 @@ fn error(i: &Input, f: Fail) -> Value {
     put("cwd", cwd);
     put("relativePath", rel);
     let cause = match &f {
+        Fail::Unmapped => unreachable!("read_file declines these"),
         Fail::OutsideRoot => {
             put("failure", "workspace_path_outside_root");
             defect(
@@ -357,7 +366,7 @@ fn is_enoent(e: &io::Error) -> bool {
 }
 
 /// libuv's code name and `uv_strerror` text, as in Node's `SystemError` message.
-fn errno(e: &io::Error) -> (&'static str, &'static str) {
+fn errno(e: &io::Error) -> Option<(&'static str, &'static str)> {
     #[cfg(unix)]
     if let Some(n) = e.raw_os_error() {
         let known = [
@@ -385,13 +394,10 @@ fn errno(e: &io::Error) -> (&'static str, &'static str) {
             (libc::ENOMEM, "ENOMEM", "not enough memory"),
             (libc::ETIMEDOUT, "ETIMEDOUT", "connection timed out"),
         ];
-        if let Some(&(_, c, d)) = known.iter().find(|k| k.0 == n) {
-            return (c, d);
-        }
+        return known.iter().find(|k| k.0 == n).map(|&(_, c, d)| (c, d));
     }
-    // shortcut: errnos outside the table spell differently from Node; extend when one shows up.
     let _ = e;
-    ("UNKNOWN", "unknown error")
+    None
 }
 
 /// `String.prototype.trim`: JS whitespace includes U+FEFF and excludes U+0085.
@@ -518,9 +524,11 @@ mod tests {
             self.read_payload(&p)
         }
         fn read_payload(&self, p: &Value) -> Result<String, String> {
-            read_file(p, &self.p("ws"), &self.p("home"))
-                .map(|v| v.to_string())
-                .map_err(|v| v.to_string())
+            match read_file(p, &self.p("ws"), &self.p("home")) {
+                Some(Ok(v)) => Ok(v.to_string()),
+                Some(Err(v)) => Err(v.to_string()),
+                None => Err("declined".into()),
+            }
         }
     }
 
@@ -735,6 +743,46 @@ mod tests {
             );
             assert_eq!(t.read(rel, None).unwrap_err(), want);
         }
+    }
+
+    #[test]
+    fn declines_what_node_answers_with_a_die_or_an_unmapped_error() {
+        let t = Tmp::new("decline");
+        let ws = t.p("ws");
+        for p in [
+            json!({"cwd": ws, "relativePath": "  "}),
+            json!({"relativePath": "small.txt"}),
+            json!({"cwd": " ", "relativePath": "small.txt"}),
+            json!({"cwd": ws, "relativePath": "a".repeat(513)}),
+            json!({"cwd": ws, "relativePath": "small.txt", "allowMissing": "yes"}),
+            json!({"cwd": ws, "relativePath": 7}),
+            json!("not an object"),
+            // No errno: Rust rejects the NUL before any syscall (Node throws a TypeError).
+            json!({"cwd": ws, "relativePath": "a\u{0}b"}),
+            json!({"cwd": ws, "relativePath": "a\u{0}b", "allowMissing": true}),
+            json!({"cwd": ws, "relativePath": "/x\u{0}y"}),
+        ] {
+            assert_eq!(t.read_payload(&p), Err("declined".into()), "{p}");
+        }
+        // 512 UTF-16 units is still a valid path.
+        let p = json!({"cwd": ws, "relativePath": "a/".repeat(256), "allowMissing": true});
+        assert!(t.read_payload(&p).unwrap().contains(r#""exists":false"#));
+    }
+
+    #[test]
+    fn backslashes_count_as_separators_in_the_relative_checks() {
+        let t = Tmp::new("backslash");
+        let ws = t.p("ws");
+        let rel = r"..\\x"; // as JSON writes `..\x`
+        let want = format!(
+            r#"{{"_tag":"ProjectReadFileError","cwd":"{ws}","relativePath":"{rel}","failure":"workspace_path_outside_root","message":"Failed to read workspace file '{rel}' in '{ws}'.","cause":{{"name":"WorkspacePathOutsideRootError","message":"Workspace file path must be relative to the project root: {rel}"}}}}"#
+        );
+        assert_eq!(t.read(r"..\x", None).unwrap_err(), want);
+        // On POSIX `a\b` is one file name; only the reported path uses `/`.
+        t.write(r"ws/a\b", b"one file\n");
+        let want =
+            r#"{"relativePath":"a/b","contents":"one file\n","byteLength":9,"truncated":false}"#;
+        assert_eq!(t.read(r"a\b", None).unwrap(), want);
     }
 
     #[test]

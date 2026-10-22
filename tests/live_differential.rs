@@ -132,7 +132,17 @@ fn start_with(
     Some((d, base, home, token))
 }
 
-/// (matches, mismatches) among the shadow log lines for `route`; prints mismatching lines.
+/// Shadow log lines for `route` where Rust declined (Node answered alone).
+fn declined(home: &Path, route: &str) -> usize {
+    let tag = format!("tag=\"{route}\"");
+    log(home)
+        .lines()
+        .filter(|l| l.contains(&tag) && l.contains("outcome=\"declined\""))
+        .count()
+}
+
+/// (matches, mismatches) among the shadow log lines for `route`, declines excluded; prints
+/// mismatching lines.
 fn shadow_counts(home: &Path, route: &str) -> (usize, usize) {
     std::thread::sleep(Duration::from_millis(300));
     let l = log(home);
@@ -140,6 +150,7 @@ fn shadow_counts(home: &Path, route: &str) -> (usize, usize) {
     let shadow: Vec<&str> = l
         .lines()
         .filter(|l| l.contains("rust shadow") && tags.iter().any(|t| l.contains(t)))
+        .filter(|l| !l.contains("outcome=\"declined\""))
         .collect();
     let mismatches = shadow.iter().filter(|l| !l.contains("\"match\"")).count();
     for s in shadow.iter().filter(|l| !l.contains("\"match\"")) {
@@ -343,6 +354,7 @@ fn read_file_shadow_matches_node() {
             std::fs::create_dir_all(home.join(dir)).unwrap();
         }
         w("ws/small.txt", b"hello\n");
+        w(r"ws/a\b", b"one file\n");
         w("out/secret.txt", b"top secret\n");
         w("fakehome/x.txt", b"home file\n");
         w("ws/nul.bin", b"a\0b");
@@ -417,6 +429,11 @@ fn read_file_shadow_matches_node() {
             json!({"cwd": ".", "relativePath": "small.txt"}),
         ),
         ("network path", p("//host/x")),
+        (r"..\x", p(r"..\x")),
+        (r"a\b", p(r"a\b")),
+        // Node answers these with a Die or an errno-less TypeError: Rust declines.
+        ("NUL in path", p("a\u{0}b")),
+        ("blank path", p("  ")),
     ];
     let port = base.rsplit(':').next().unwrap().to_owned();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -457,7 +474,10 @@ fn read_file_shadow_matches_node() {
     let (matches, mismatches) = shadow_counts(&home, "projects.readFile");
     println!("raw client: {matches} match, {mismatches} mismatch");
     assert_eq!(mismatches, 0);
-    assert_eq!(matches, cases.len(), "every request compared");
+    let declines = declined(&home, "projects.readFile");
+    println!("raw client: {declines} declined");
+    assert_eq!(declines, 2);
+    assert_eq!(matches, cases.len() - 2, "every other request compared");
 
     // A browser boot asks for `t3.json` on its own; pair it with a second token.
     if !Path::new(CHROME).exists() {
@@ -490,7 +510,7 @@ fn read_file_shadow_matches_node() {
         let deadline = Instant::now() + Duration::from_secs(45);
         while shadow_counts(&home, "projects.readFile").0
             + shadow_counts(&home, "projects.readFile").1
-            <= cases.len()
+            <= cases.len() - 2
             && Instant::now() < deadline
         {
             std::thread::sleep(Duration::from_millis(500));
@@ -500,7 +520,10 @@ fn read_file_shadow_matches_node() {
         let (m, mm) = shadow_counts(&home, "projects.readFile");
         println!("after browser boot: {m} match, {mm} mismatch");
         assert_eq!(mm, 0);
-        assert!(m > cases.len(), "the browser boot sent projects.readFile");
+        assert!(
+            m > cases.len() - 2,
+            "the browser boot sent projects.readFile"
+        );
     }
     drop(d);
     assert!(!home.exists());

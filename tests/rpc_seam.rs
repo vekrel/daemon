@@ -820,6 +820,14 @@ async fn serve_decline_forwards_the_original_request_to_node() {
         recv(&mut c).await,
         exit(4, r#"{"_tag":"Success","value":{"decline":true}}"#)
     );
+    // Rust no longer owns id 4: its Ack and Interrupt reach Node byte for byte.
+    for f in [
+        r#"{"_tag":"Ack","requestId":4}"#,
+        r#"{"_tag":"Interrupt", "requestId":4}"#,
+    ] {
+        send(&mut c, f).await;
+        assert_eq!(next_ev(&mut r).await, format!("text:{f}"));
+    }
 }
 
 #[tokio::test]
