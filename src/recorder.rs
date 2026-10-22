@@ -35,11 +35,25 @@ struct Line<'a> {
 impl Recorder {
     /// Opens `<dir>/<YYYYMMDDTHHMMSSZ>-<8 hex>.ndjson` and starts its writer thread.
     pub fn create(dir: &Path) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
+        // Recordings hold session tokens and cookies: owner-only, like the engine's secrets.
+        let mut db = fs::DirBuilder::new();
+        db.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            db.mode(0o700).create(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        db.create(dir)?;
         let secs = now_ms() / 1000;
         let rand = RandomState::new().hash_one(secs) as u32;
         let path = dir.join(format!("{}-{rand:08x}.ndjson", iso_basic(secs)));
-        let file = File::options().write(true).create_new(true).open(&path)?;
+        let mut opts = File::options();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let file = opts.open(&path)?;
         let (tx, rx) = sync_channel(QUEUE);
         thread::Builder::new()
             .name("vekrel-recorder".into())
@@ -149,5 +163,21 @@ mod tests {
         assert_eq!(super::iso_basic(0), "19700101T000000Z");
         assert_eq!(super::iso_basic(1_792_670_645), "20261022T120405Z");
         assert_eq!(super::iso_basic(951_782_400), "20000229T000000Z");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_file_and_dir_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("vekrel-perm-{}", std::process::id()));
+        let dir = root.join("recordings");
+        // Pre-existing, too-open dir must be tightened.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rec = super::Recorder::create(&dir).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(rec.path()), 0o600);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
