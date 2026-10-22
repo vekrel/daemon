@@ -4,7 +4,7 @@ use std::time::Duration;
 struct Guard(Child);
 impl Drop for Guard {
     fn drop(&mut self) {
-        // SIGTERM so vekreld reaps its engine child; SIGKILL would orphan it.
+        // SIGTERM so vekrel reaps its engine child; SIGKILL would orphan it.
         let _ = Command::new("kill").args(["-TERM", &self.0.id().to_string()]).status();
         std::thread::sleep(Duration::from_millis(200));
         let _ = self.0.kill();
@@ -17,15 +17,14 @@ fn free_port() -> u16 {
 }
 
 fn start(name: &str, command: &str, args: &[&str]) -> (Guard, u16) {
-    let health = free_port();
+    let health = free_port(); // the public server port
     let args_toml = args.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(", ");
     let cfg = format!(
-        "[engine]\ncommand = {command:?}\nargs = [{args_toml}]\nport = {}\n[daemon]\nhealth_port = {health}\n",
-        free_port()
+        "[server]\nport = {health}\n[engine]\ncommand = {command:?}\nargs = [{args_toml}]\n"
     );
-    let path = std::env::temp_dir().join(format!("vekreld-test-{}-{name}.toml", std::process::id()));
+    let path = std::env::temp_dir().join(format!("vekrel-test-{}-{name}.toml", std::process::id()));
     std::fs::write(&path, cfg).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_vekreld"))
+    let child = Command::new(env!("CARGO_BIN_EXE_vekrel"))
         .args(["serve", "--config"])
         .arg(&path)
         .spawn()
@@ -98,10 +97,28 @@ async fn sigterm_stops_engine_child() {
     Command::new("kill").args(["-TERM", &g.0.id().to_string()]).status().unwrap();
     let end = tokio::time::Instant::now() + Duration::from_secs(3);
     while g.0.try_wait().unwrap().is_none() {
-        assert!(tokio::time::Instant::now() < end, "vekreld did not exit");
+        assert!(tokio::time::Instant::now() < end, "vekrel did not exit");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(g.0.try_wait().unwrap().unwrap().success());
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!found(), "engine child orphaned");
+}
+
+#[tokio::test]
+async fn child_receives_vekrel_port_env() {
+    let dir = std::env::temp_dir().join(format!("vekrel-env-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("port"), dir.join("rest"));
+    let script = format!(
+        "echo $VEKREL_PORT > {}; echo $VEKREL_HOST $VEKREL_NO_BROWSER > {}; sleep 30",
+        a.display(),
+        b.display()
+    );
+    let (_g, port) = start("env", "sh", &["-c", &script]);
+    poll(port, Duration::from_secs(2), |h| h.0 == "up").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read_to_string(a).unwrap().trim(), (port + 10).to_string());
+    assert_eq!(std::fs::read_to_string(b).unwrap().trim(), "127.0.0.1 1");
+    let _ = std::fs::remove_dir_all(dir);
 }

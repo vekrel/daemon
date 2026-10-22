@@ -1,7 +1,7 @@
 use crate::config::EngineConfig;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -10,22 +10,26 @@ use tokio::process::Command;
 pub struct State {
     pub engine_up: AtomicBool,
     pub restarts: AtomicU32,
+    /// Bumped on every (re)spawn; proxied sockets compare it to detect a restart.
+    pub generation: AtomicU64,
 }
-
 
 /// 1s doubling, capped at 30s.
 pub fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_secs(1u64 << attempt.min(5)).min(Duration::from_secs(30))
 }
 
-pub async fn run(cfg: EngineConfig, state: Arc<State>) {
+pub async fn run(cfg: EngineConfig, port: u16, state: Arc<State>) {
     // attempt drives backoff and resets after 60s up; restarts only ever grows.
     let mut attempt: u32 = 0;
     loop {
         let started = Instant::now();
+        state.generation.fetch_add(1, Ordering::SeqCst);
         let spawned = Command::new(&cfg.command)
             .args(&cfg.args)
-            .env("VEKREL_PORT", cfg.port.to_string())
+            .env("VEKREL_PORT", port.to_string())
+            .env("VEKREL_HOST", "127.0.0.1")
+            .env("VEKREL_NO_BROWSER", "1")
             .kill_on_drop(true)
             .spawn();
         match spawned {

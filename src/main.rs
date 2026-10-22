@@ -1,5 +1,5 @@
 mod config;
-mod health;
+mod server;
 mod supervisor;
 
 use clap::{Parser, Subcommand};
@@ -16,20 +16,25 @@ enum Cmd {
     Serve {
         #[arg(long)]
         config: PathBuf,
+        /// Record WS frames (used by later tasks).
+        #[arg(long)]
+        record: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    let Cmd::Serve { config } = Cli::parse().cmd;
-    let cfg = config::load(&config)?;
+    let Cmd::Serve { config, record } = Cli::parse().cmd;
+    let mut cfg = config::load(&config)?;
+    cfg.engine.record |= record;
+    let engine_port = cfg.engine_port();
     let state = Arc::new(supervisor::State::default());
-    tokio::spawn(supervisor::run(cfg.engine, state.clone()));
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.daemon.health_port)).await?;
+    tokio::spawn(supervisor::run(cfg.engine, engine_port, state.clone()));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.server.port)).await?;
     // Returning drops the runtime, which drops the supervisor's child (kill_on_drop).
     tokio::select! {
-        r = axum::serve(listener, health::router(state)) => r?,
+        r = axum::serve(listener, server::build(state, server::Upstream::loopback(engine_port))) => r?,
         _ = shutdown_signal() => tracing::info!("shutting down"),
     }
     Ok(())
