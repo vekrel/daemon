@@ -1,5 +1,6 @@
 //! Effect RPC envelopes (`RpcMessage.ts`, JSON serialization): one message per text frame,
-//! or a JSON array of messages.
+//! or a JSON array of messages. Ids are client-chosen per connection (JSON numbers from the
+//! web client) and kept as raw JSON so they echo back unchanged.
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -7,18 +8,21 @@ use serde_json::Value;
 #[serde(tag = "_tag", rename_all_fields = "camelCase")]
 pub enum ClientMsg {
     Request {
-        id: String,
+        id: Value,
         tag: String,
         #[serde(default)]
         payload: Value,
+        trace_id: Option<String>,
+        span_id: Option<String>,
+        sampled: Option<bool>,
         #[serde(default)]
         headers: Vec<(String, String)>,
     },
     Ack {
-        request_id: String,
+        request_id: Value,
     },
     Interrupt {
-        request_id: String,
+        request_id: Value,
     },
     Ping,
     Eof,
@@ -28,11 +32,11 @@ pub enum ClientMsg {
 #[serde(tag = "_tag", rename_all_fields = "camelCase")]
 pub enum ServerMsg {
     Chunk {
-        request_id: String,
+        request_id: Value,
         values: Vec<Value>,
     },
     Exit {
-        request_id: String,
+        request_id: Value,
         exit: Value,
     },
     Pong,
@@ -79,7 +83,7 @@ fn parse_msg(v: Value) -> Result<Envelope, WireError> {
 
 impl Envelope {
     /// `(_tag, request id)`: the replay comparison key. Request uses `id`, replies `requestId`.
-    pub fn key(&self) -> (&'static str, Option<&str>) {
+    pub fn key(&self) -> (&'static str, Option<&Value>) {
         use ClientMsg as C;
         use ServerMsg as S;
         match self {
@@ -116,10 +120,58 @@ mod tests {
         assert_eq!(
             e,
             Envelope::Client(ClientMsg::Request {
-                id: "1".into(),
+                id: json!("1"),
                 tag: "server.getConfig".into(),
                 payload: json!({}),
+                trace_id: None,
+                span_id: None,
+                sampled: None,
                 headers: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_numeric_ids_from_real_frames() {
+        // Envelope shapes from the real boot session (research section 2), neutral values.
+        let req = one(
+            r#"{"_tag":"Request","id":0,"tag":"subscribeServerConfig","payload":{},"traceId":"0123456789abcdef0123456789abcdef","spanId":"0123456789abcdef","sampled":true,"headers":[]}"#,
+        );
+        assert_eq!(
+            req,
+            Envelope::Client(ClientMsg::Request {
+                id: json!(0),
+                tag: "subscribeServerConfig".into(),
+                payload: json!({}),
+                trace_id: Some("0123456789abcdef0123456789abcdef".into()),
+                span_id: Some("0123456789abcdef".into()),
+                sampled: Some(true),
+                headers: vec![],
+            })
+        );
+        assert_eq!(req.key(), ("Request", Some(&json!(0))));
+        assert_eq!(
+            one(r#"{"_tag":"Ack","requestId":0}"#),
+            Envelope::Client(ClientMsg::Ack {
+                request_id: json!(0)
+            })
+        );
+        assert_eq!(
+            one(r#"{"_tag":"Interrupt","requestId":18}"#),
+            Envelope::Client(ClientMsg::Interrupt {
+                request_id: json!(18)
+            })
+        );
+        let cause: Vec<_> = (0..9)
+            .map(|_| json!({"_tag":"Interrupt","fiberId":1234}))
+            .collect();
+        let exit = json!({"_tag":"Failure","cause":cause});
+        let text = json!({"_tag":"Exit","requestId":18,"exit":exit}).to_string();
+        assert_eq!(
+            one(&text),
+            Envelope::Server(ServerMsg::Exit {
+                request_id: json!(18),
+                exit
             })
         );
     }
@@ -131,7 +183,7 @@ mod tests {
         assert_eq!(
             e,
             Envelope::Server(ServerMsg::Chunk {
-                request_id: "2".into(),
+                request_id: json!("2"),
                 values: vec![json!({"type":"snapshot","config":{}})],
             })
         );
@@ -144,7 +196,7 @@ mod tests {
         assert_eq!(
             e,
             Envelope::Server(ServerMsg::Exit {
-                request_id: "1".into(),
+                request_id: json!("1"),
                 exit: json!({"_tag":"Success","value":{"ok":true}}),
             })
         );
@@ -154,7 +206,7 @@ mod tests {
         assert_eq!(
             one(&text),
             Envelope::Server(ServerMsg::Exit {
-                request_id: "3".into(),
+                request_id: json!("3"),
                 exit: fail
             })
         );
@@ -173,7 +225,7 @@ mod tests {
             vec![
                 Envelope::Client(ClientMsg::Ping),
                 Envelope::Client(ClientMsg::Ack {
-                    request_id: "1".into()
+                    request_id: json!("1")
                 }),
             ]
         );

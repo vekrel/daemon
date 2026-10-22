@@ -13,7 +13,13 @@ use axum::{
     response::Response,
 };
 use futures_util::{FutureExt, SinkExt, StreamExt};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use tokio::sync::watch;
 use tokio_tungstenite::{
     connect_async,
@@ -30,10 +36,12 @@ pub enum Dir {
     S2c,
 }
 
-/// Sees every proxied frame; Task 4's recorder implements this.
+/// Sees every proxied frame; `conn` is unique per proxied WS connection within the process.
 pub trait FrameTap: Send + Sync {
-    fn on_frame(&self, _dir: Dir, _frame: &Message) {}
+    fn on_frame(&self, _conn: u64, _dir: Dir, _frame: &Message) {}
 }
+
+static NEXT_CONN: AtomicU64 = AtomicU64::new(0);
 
 pub struct NoTap;
 impl FrameTap for NoTap {}
@@ -96,7 +104,10 @@ pub async fn handler(
         Some(p) => ws.protocols(p.to_str().ok().map(str::to_owned)),
         None => ws,
     };
-    ws.on_upgrade(move |client| pump(client, up, generation, shutdown, ctx.tap))
+    ws.on_upgrade(move |client| {
+        let conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
+        pump(client, up, generation, shutdown, ctx.tap, conn)
+    })
 }
 
 async fn pump<U>(
@@ -105,6 +116,7 @@ async fn pump<U>(
     mut generation: watch::Receiver<u64>,
     mut shutdown: watch::Receiver<bool>,
     tap: Arc<dyn FrameTap>,
+    conn: u64,
 ) where
     U: StreamExt<Item = Result<Message, WsError>> + SinkExt<Message, Error = WsError> + Unpin,
 {
@@ -114,7 +126,7 @@ async fn pump<U>(
             m = client.next() => {
                 let Some(Ok(m)) = m else { break };
                 let m = from_axum(m);
-                tap.on_frame(Dir::C2s, &m);
+                tap.on_frame(conn, Dir::C2s, &m);
                 let close = m.is_close();
                 if up.send(m).await.is_err() || close { break }
             }
@@ -125,7 +137,7 @@ async fn pump<U>(
                     let _ = client.send(AxMsg::Close(Some(f))).await;
                     break;
                 };
-                tap.on_frame(Dir::S2c, &m);
+                tap.on_frame(conn, Dir::S2c, &m);
                 let close = m.is_close();
                 if client.send(to_axum(m)).await.is_err() || close { break }
             }

@@ -28,11 +28,12 @@ pub struct Recorder {
 }
 
 /// A frame to write, or `None`: flush and stop.
-type Item = Option<(u64, Dir, String)>;
+type Item = Option<(u64, u64, Dir, String)>;
 
 #[derive(Serialize)]
 struct Line<'a> {
     t: u64,
+    conn: u64,
     dir: &'a str,
     frame: &'a str,
 }
@@ -113,7 +114,7 @@ impl Recorder {
 }
 
 impl FrameTap for Recorder {
-    fn on_frame(&self, dir: Dir, frame: &Message) {
+    fn on_frame(&self, conn: u64, dir: Dir, frame: &Message) {
         // Effect RPC is text-only; other frames are counted, not recorded.
         let Message::Text(text) = frame else {
             self.skipped.fetch_add(1, Ordering::Relaxed);
@@ -121,7 +122,7 @@ impl FrameTap for Recorder {
         };
         match self
             .tx
-            .try_send(Some((now_ms(), dir, text.as_str().to_owned())))
+            .try_send(Some((now_ms(), conn, dir, text.as_str().to_owned())))
         {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -138,7 +139,7 @@ impl FrameTap for Recorder {
 }
 
 fn write_loop(rx: Receiver<Item>, mut out: BufWriter<File>) {
-    let write = |out: &mut BufWriter<File>, (t, dir, frame): (u64, Dir, String)| {
+    let write = |out: &mut BufWriter<File>, (t, conn, dir, frame): (u64, u64, Dir, String)| {
         let dir = match dir {
             Dir::C2s => "c2s",
             Dir::S2c => "s2c",
@@ -147,6 +148,7 @@ fn write_loop(rx: Receiver<Item>, mut out: BufWriter<File>) {
             &mut *out,
             &Line {
                 t,
+                conn,
                 dir,
                 frame: &frame,
             },

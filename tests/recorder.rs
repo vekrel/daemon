@@ -133,16 +133,72 @@ fn close_writes_every_queued_frame_then_stops() {
         TempDir(std::env::temp_dir().join(format!("vekrel-rec-close-{}", std::process::id())));
     let rec = Recorder::create(&dir.0).unwrap();
     for i in 0..1000 {
-        rec.on_frame(Dir::C2s, &Message::text(format!("f{i}")));
+        rec.on_frame(7, Dir::C2s, &Message::text(format!("f{i}")));
     }
     rec.close(Duration::from_secs(1));
-    rec.on_frame(Dir::C2s, &Message::text("late"));
+    rec.on_frame(7, Dir::C2s, &Message::text("late"));
     let text = std::fs::read_to_string(rec.path()).unwrap();
     assert_eq!(text.lines().count(), 1000);
     assert!(
-        text.ends_with("\"frame\":\"f999\"}\n"),
+        text.ends_with("\"conn\":7,\"dir\":\"c2s\",\"frame\":\"f999\"}\n"),
         "{}",
         &text[text.len() - 60..]
     );
     assert_eq!(rec.dropped(), 1);
+}
+
+#[tokio::test]
+async fn recorder_writes_conn_field_distinct_per_connection() {
+    let up = Router::new().route(
+        "/ws",
+        get(|ws: WebSocketUpgrade| async move {
+            ws.on_upgrade(|mut s| async move {
+                while let Some(Ok(AxMsg::Text(_))) = s.next().await {
+                    let _ = s.send(AxMsg::Text(PONG.into())).await;
+                }
+            })
+        }),
+    );
+    let (up, _g1) = serve(up).await;
+    let dir = TempDir(std::env::temp_dir().join(format!("vekrel-rec-conn-{}", std::process::id())));
+    let rec = Arc::new(Recorder::create(&dir.0).unwrap());
+    let path = rec.path().to_owned();
+    let app = server::build_with_tap(
+        Arc::new(State::default()),
+        server::Upstream::loopback(up),
+        rec,
+    );
+    let (proxy, _g2) = serve(app).await;
+    let url = format!("ws://127.0.0.1:{proxy}/ws");
+    let (mut a, _) = connect_async(&url).await.unwrap();
+    let (mut b, _) = connect_async(&url).await.unwrap();
+    for (i, f) in ["a1", "b1", "a2"].into_iter().enumerate() {
+        let c = if i == 1 { &mut b } else { &mut a };
+        c.send(Message::text(f)).await.unwrap();
+        c.next().await.unwrap().unwrap();
+    }
+
+    let mut rows: Vec<Value> = vec![];
+    for _ in 0..100 {
+        rows = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        if rows.len() >= 6 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(rows.len(), 6, "{rows:?}");
+    let conn_of = |frame: &str| {
+        let r = rows.iter().find(|r| r["frame"] == frame).unwrap();
+        r["conn"].as_u64().unwrap()
+    };
+    let (ca, cb) = (conn_of("a1"), conn_of("b1"));
+    assert_ne!(ca, cb);
+    assert_eq!(conn_of("a2"), ca);
+    // Replies carry their connection's id too.
+    let count = |c: u64| rows.iter().filter(|r| r["conn"] == c).count();
+    assert_eq!((count(ca), count(cb)), (4, 2), "{rows:?}");
 }

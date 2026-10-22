@@ -1,0 +1,11 @@
+{"t":1000,"conn":0,"dir":"c2s","frame":"{\"_tag\":\"Request\",\"id\":0,\"tag\":\"server.getConfig\",\"payload\":{},\"traceId\":\"00000000000000000000000000000001\",\"spanId\":\"0000000000000001\",\"sampled\":true,\"headers\":[]}"}
+{"t":1010,"conn":0,"dir":"s2c","frame":"{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Success\",\"value\":{\"cwd\":\"/home/user/project\",\"keybindings\":[]}}}"}
+{"t":1020,"conn":0,"dir":"c2s","frame":"{\"_tag\":\"Request\",\"id\":1,\"tag\":\"subscribeServerLifecycle\",\"payload\":{},\"traceId\":\"00000000000000000000000000000001\",\"spanId\":\"0000000000000001\",\"sampled\":true,\"headers\":[]}"}
+{"t":1030,"conn":0,"dir":"s2c","frame":"{\"_tag\":\"Chunk\",\"requestId\":1,\"values\":[{\"version\":1,\"sequence\":1,\"type\":\"welcome\",\"payload\":{\"cwd\":\"/home/user/project\"}},{\"version\":1,\"sequence\":2,\"type\":\"ready\",\"payload\":{}}]}"}
+{"t":1040,"conn":0,"dir":"c2s","frame":"{\"_tag\":\"Ack\",\"requestId\":1}"}
+{"t":1050,"conn":0,"dir":"s2c","frame":"{\"_tag\":\"Chunk\",\"requestId\":1,\"values\":[{\"version\":1,\"sequence\":3,\"type\":\"ready\",\"payload\":{}}]}"}
+{"t":1060,"conn":0,"dir":"c2s","frame":"{\"_tag\":\"Ack\",\"requestId\":1}"}
+{"t":1070,"conn":0,"dir":"c2s","frame":"{\"_tag\":\"Ping\"}"}
+{"t":1080,"conn":0,"dir":"s2c","frame":"{\"_tag\":\"Pong\"}"}
+{"t":1090,"conn":0,"dir":"c2s","frame":"{\"_tag\":\"Interrupt\",\"requestId\":1}"}
+{"t":1100,"conn":0,"dir":"s2c","frame":"{\"_tag\":\"Exit\",\"requestId\":1,\"exit\":{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42},{\"_tag\":\"Interrupt\",\"fiberId\":42}]}}"}
