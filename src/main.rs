@@ -1,9 +1,6 @@
-mod config;
-mod server;
-mod supervisor;
-
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
+use vekrel::{config, server, supervisor};
 
 #[derive(Parser)]
 struct Cli {
