@@ -1,17 +1,32 @@
 //! `GET /.well-known/vekrel/machine`: bytes and key order against a golden copied from a real
 //! engine reply (fixture line 2 `config.machine`, personal values replaced), the per-request
-//! `agentActivityPublishing` secret read, and which engine configs Rust declines.
-use axum::http::Request;
-use std::path::{Path, PathBuf};
+//! `agentActivityPublishing` secret read, the per-generation cache filled from Node's own
+//! descriptor, and which engine configs Rust declines.
+use axum::{
+    Router,
+    http::{Request, request::Parts},
+    routing::get,
+};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio::net::TcpListener;
 use vekrel::{
     config::EngineConfig,
     handlers::{
         HandlerCtx,
         machine_descriptor::{
-            Facts, MachineDescriptor, agent_activity_publishing, descriptor_json, engine_version,
+            Facts, Machine, MachineDescriptor, Probe, agent_activity_publishing, descriptor_json,
+            supported_engine,
         },
     },
     http_seam::RouteHandler,
+    supervisor::State,
 };
 
 const GOLDEN: &str = include_str!("golden/machine_descriptor.json");
@@ -23,35 +38,34 @@ fn tmp(name: &str) -> PathBuf {
     d
 }
 
-fn facts() -> Facts {
-    Facts {
+fn machine() -> Machine {
+    Machine {
+        machine_id: "00000000-0000-4000-8000-000000000000".into(),
         label: "Test machine".into(),
-        os: "darwin",
-        arch: "arm64",
+        os: "darwin".into(),
+        arch: "arm64".into(),
         machine: Some("laptop"),
+        server_version: "0.0.0-test".into(),
     }
 }
 
 #[test]
 fn descriptor_matches_golden_bytes_and_key_order() {
-    let got = descriptor_json(
-        "00000000-0000-4000-8000-000000000000",
-        &facts(),
-        "0.0.0-test",
-        false,
-    );
+    let got = descriptor_json(&machine(), false);
     assert_eq!(String::from_utf8(got).unwrap(), GOLDEN.trim_end());
 }
 
 #[test]
 fn unknown_machine_kind_omits_the_key_and_publishing_flips_in_place() {
-    let f = Facts {
+    let m = Machine {
         machine: None,
-        ..facts()
+        ..machine()
     };
-    let got = String::from_utf8(descriptor_json("id", &f, "1", true)).unwrap();
+    let got = String::from_utf8(descriptor_json(&m, true)).unwrap();
     assert!(got.contains(r#""platform":{"os":"darwin","arch":"arm64"},"#));
-    assert!(got.contains(r#""pullRequestStackActions":true,"agentActivityPublishing":true,"projectCloneTracking":true"#));
+    assert!(got.contains(
+        r#""pullRequestStackActions":true,"agentActivityPublishing":true,"projectCloneTracking":true"#
+    ));
 }
 
 #[test]
@@ -92,39 +106,24 @@ fn fake_engine(root: &Path, rel: &str) -> PathBuf {
     let bin = root.join(rel);
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::write(&bin, "").unwrap();
-    std::fs::write(
-        bin.parent().unwrap().parent().unwrap().join("package.json"),
-        r#"{"name":"t3","version":"9.8.7"}"#,
-    )
-    .unwrap();
     bin
 }
 
 #[test]
-fn engine_version_reads_package_json_next_to_the_bundle() {
-    let d = tmp("engine");
-    let bin = fake_engine(&d, "apps/server/dist/bin.mjs");
-    let none = |_: &str| None;
-    let v = engine_version(&engine("node", &[bin.to_str().unwrap()]), &d, none);
-    assert_eq!(v.unwrap(), "9.8.7");
-    // Relative to the engine's cwd, and via an absolute node path.
-    let v = engine_version(
-        &engine("/usr/local/bin/node", &["apps/server/dist/bin.mjs"]),
-        &d,
-        none,
-    );
-    assert_eq!(v.unwrap(), "9.8.7");
-    std::fs::remove_dir_all(&d).unwrap();
-}
-
-#[test]
-fn engine_version_declines_what_rust_cannot_reproduce() {
+fn supported_engine_declines_what_rust_cannot_reproduce() {
     let d = tmp("decline");
     let bin = fake_engine(&d, "apps/server/dist/bin.mjs");
     let bin = bin.to_str().unwrap();
     let none = |_: &str| None;
+    assert_eq!(supported_engine(&engine("node", &[bin]), &d, none), Ok(()));
+    let rel = supported_engine(
+        &engine("/usr/local/bin/node", &["apps/server/dist/bin.mjs"]),
+        &d,
+        none,
+    );
+    assert_eq!(rel, Ok(()));
     let err = |c: &str, a: &[&str], env: &dyn Fn(&str) -> Option<String>| {
-        engine_version(&engine(c, a), &d, env).unwrap_err()
+        supported_engine(&engine(c, a), &d, env).unwrap_err()
     };
     assert!(err("bun", &[bin], &none).contains("node"));
     assert!(err("node", &["--inspect", bin], &none).contains("script"));
@@ -148,48 +147,161 @@ fn engine_version_declines_what_rust_cannot_reproduce() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
-#[tokio::test]
-async fn handler_reads_machine_id_once_and_publishing_per_request() {
-    let d = tmp("handler");
-    let state = d.join("userdata");
-    std::fs::create_dir_all(state.join("secrets")).unwrap();
+/// A fake engine whose descriptor reply can change between "restarts".
+async fn fake_node(reply: Arc<Mutex<String>>) -> u16 {
+    let app = Router::new().route(
+        "/.well-known/vekrel/machine",
+        get(move || {
+            let r = reply.lock().unwrap().clone();
+            async move { r }
+        }),
+    );
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    port
+}
+
+fn node_reply(version: &str) -> String {
+    format!(
+        r#"{{"machineId":"x","label":"x","platform":{{"os":"linux","arch":"x64"}},"serverVersion":"{version}"}}"#
+    )
+}
+
+struct Rig {
+    d: PathBuf,
+    state: Arc<State>,
+    ctx: HandlerCtx,
+    reply: Arc<Mutex<String>>,
+    probes: Arc<AtomicUsize>,
+    h: MachineDescriptor,
+    parts: Parts,
+}
+
+async fn rig(name: &str, probe_ok: bool) -> Rig {
+    let d = tmp(name);
+    let state_dir = d.join("userdata");
+    std::fs::create_dir_all(state_dir.join("secrets")).unwrap();
+    std::fs::write(
+        state_dir.join("machine-id"),
+        " 11111111-2222-4333-8444-555555555555\n",
+    )
+    .unwrap();
+    let reply = Arc::new(Mutex::new(node_reply("1.0.0")));
     let ctx = HandlerCtx {
         cwd: d.clone(),
-        state_dir: state.clone(),
-        engine_port: 1,
+        state_dir,
+        engine_port: fake_node(reply.clone()).await,
         ..HandlerCtx::default()
     };
-    let h = MachineDescriptor::new("9.8.7".into());
+    let state = Arc::new(State::default());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let n = probes.clone();
+    // `None`: a probe timed out.
+    let probe: Probe = Arc::new(move |platform: &str, _: &Path| {
+        assert_eq!(platform, "linux", "probes follow Node's platform");
+        n.fetch_add(1, Ordering::SeqCst);
+        probe_ok.then(|| Facts {
+            label: "Probed".into(),
+            machine: Some("laptop"),
+        })
+    });
+    let h = MachineDescriptor::start(state.clone(), ctx.clone(), probe);
     let (parts, ()) = Request::get("/.well-known/vekrel/machine")
         .body(())
         .unwrap()
         .into_parts();
-    // No machine-id yet: Node is still creating it, so Node answers.
-    assert!(h.handle(&parts, &ctx).await.is_none());
-    std::fs::write(
-        state.join("machine-id"),
-        " 11111111-2222-4333-8444-555555555555\n",
-    )
-    .unwrap();
-    let r = h.handle(&parts, &ctx).await.unwrap();
-    assert_eq!(r.status(), 200);
-    assert_eq!(r.headers()["content-type"], "application/json");
-    let v: serde_json::Value = serde_json::from_slice(r.body()).unwrap();
+    Rig {
+        d,
+        state,
+        ctx,
+        reply,
+        probes,
+        h,
+        parts,
+    }
+}
+
+impl Rig {
+    async fn get(&self) -> Option<serde_json::Value> {
+        let r = self.h.handle(&self.parts, &self.ctx).await?;
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["content-type"], "application/json");
+        Some(serde_json::from_slice(r.body()).unwrap())
+    }
+
+    async fn wait(&self) -> serde_json::Value {
+        for _ in 0..100 {
+            if let Some(v) = self.get().await {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("handler never answered");
+    }
+}
+
+#[tokio::test]
+async fn none_until_nodes_descriptor_is_fetched_then_follows_each_generation() {
+    let r = rig("gen", true).await;
+    // Engine not ready yet: Node answers.
+    assert!(r.get().await.is_none());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(r.get().await.is_none());
+    assert_eq!(r.probes.load(Ordering::SeqCst), 0);
+
+    r.state.engine_up.store(true, Ordering::SeqCst);
+    let v = r.wait().await;
     assert_eq!(v["machineId"], "11111111-2222-4333-8444-555555555555");
-    assert_eq!(v["serverVersion"], "9.8.7");
+    assert_eq!(v["label"], "Probed");
+    assert_eq!(
+        v["platform"],
+        serde_json::json!({"os":"linux","arch":"x64","machine":"laptop"})
+    );
+    assert_eq!(v["serverVersion"], "1.0.0");
     assert_eq!(v["capabilities"]["agentActivityPublishing"], false);
-    // Node caches the id; the secret is re-read.
-    std::fs::write(state.join("machine-id"), "changed\n").unwrap();
+
+    // Warmed: requests never probe. The publishing secret is still re-read per request.
     for (n, val) in [
         ("cloud-publish-agent-activity", "true"),
         ("cloud-relay-url", "wss://relay.test"),
         ("cloud-relay-machine-credential", "cred"),
     ] {
-        std::fs::write(state.join(format!("secrets/{n}.bin")), val).unwrap();
+        std::fs::write(r.ctx.state_dir.join(format!("secrets/{n}.bin")), val).unwrap();
     }
-    let v: serde_json::Value =
-        serde_json::from_slice(h.handle(&parts, &ctx).await.unwrap().body()).unwrap();
-    assert_eq!(v["machineId"], "11111111-2222-4333-8444-555555555555");
-    assert_eq!(v["capabilities"]["agentActivityPublishing"], true);
-    std::fs::remove_dir_all(&d).unwrap();
+    for _ in 0..3 {
+        let v = r.get().await.unwrap();
+        assert_eq!(v["capabilities"]["agentActivityPublishing"], true);
+    }
+    assert_eq!(r.probes.load(Ordering::SeqCst), 1);
+
+    // Restart: the supervisor drops engine_up, then bumps the generation.
+    r.state.engine_up.store(false, Ordering::SeqCst);
+    *r.reply.lock().unwrap() = node_reply("9.9.9");
+    std::fs::write(
+        r.ctx.state_dir.join("machine-id"),
+        "22222222-2222-4333-8444-555555555555\n",
+    )
+    .unwrap();
+    r.state.bump_generation();
+    assert!(
+        r.get().await.is_none(),
+        "old generation's cache is not served"
+    );
+    r.state.engine_up.store(true, Ordering::SeqCst);
+    let v = r.wait().await;
+    assert_eq!(v["serverVersion"], "9.9.9");
+    assert_eq!(v["machineId"], "22222222-2222-4333-8444-555555555555");
+    assert_eq!(r.probes.load(Ordering::SeqCst), 2);
+    std::fs::remove_dir_all(&r.d).unwrap();
+}
+
+#[tokio::test]
+async fn probe_timeout_leaves_the_generation_to_node() {
+    let r = rig("timeout", false).await;
+    r.state.engine_up.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(r.probes.load(Ordering::SeqCst) >= 1);
+    assert!(r.get().await.is_none());
+    std::fs::remove_dir_all(&r.d).unwrap();
 }

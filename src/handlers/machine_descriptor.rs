@@ -1,37 +1,47 @@
 //! `GET /.well-known/vekrel/machine`, byte-compatible with the engine's `ServerMachine`.
 use super::HandlerCtx;
-use crate::{config::EngineConfig, http_seam::RouteHandler};
+use crate::{config::EngineConfig, http_seam::RouteHandler, supervisor::State};
 use axum::{
-    body::Bytes,
-    http::{Method, Response, header, request::Parts},
+    body::{Body, Bytes},
+    http::{Method, Request, Response, header, request::Parts},
 };
 use futures_util::{FutureExt, future::BoxFuture};
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
     path::Path,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, atomic::Ordering},
+    time::Duration,
 };
 
-/// What the engine probes once at startup (`ServerMachine.make`).
+/// The host probes Rust runs itself (`resolveServerMachineLabel`, `detectServerMachineKind`).
 #[derive(Debug, Clone)]
 pub struct Facts {
     pub label: String,
-    /// `platformOs(process.platform)`.
-    pub os: &'static str,
-    /// `platformArch(process.arch)`.
-    pub arch: &'static str,
     pub machine: Option<&'static str>,
+}
+
+/// Runs the host probes for Node's `process.platform` in the engine's cwd. `None`: a probe timed
+/// out, so Node may have seen a different answer.
+pub type Probe = Arc<dyn Fn(&str, &Path) -> Option<Facts> + Send + Sync>;
+
+/// Everything in the descriptor except `agentActivityPublishing`.
+#[derive(Debug, Clone)]
+pub struct Machine {
+    pub machine_id: String,
+    pub label: String,
+    /// Copied from Node's own descriptor: `process.platform`/`arch` of the node binary.
+    pub os: String,
+    pub arch: String,
+    pub machine: Option<&'static str>,
+    /// Copied from Node's own descriptor: the version inlined into the bundle at build time.
+    pub server_version: String,
 }
 
 /// The descriptor bytes as Node encodes them (`ExecutionMachineDescriptor` schema order), for an
 /// engine whose launcher mode adds no optional capabilities.
-pub fn descriptor_json(
-    machine_id: &str,
-    facts: &Facts,
-    server_version: &str,
-    agent_activity_publishing: bool,
-) -> Vec<u8> {
+pub fn descriptor_json(m: &Machine, agent_activity_publishing: bool) -> Vec<u8> {
     let mut capabilities = Map::new();
     for &k in CAPABILITIES {
         let v = match k {
@@ -42,14 +52,14 @@ pub fn descriptor_json(
         capabilities.insert(k.to_owned(), v);
     }
     serde_json::to_vec(&Descriptor {
-        machine_id,
-        label: &facts.label,
+        machine_id: &m.machine_id,
+        label: &m.label,
         platform: Platform {
-            os: facts.os,
-            arch: facts.arch,
-            machine: facts.machine,
+            os: &m.os,
+            arch: &m.arch,
+            machine: m.machine,
         },
-        server_version,
+        server_version: &m.server_version,
         orchestration_protocol_version: 2,
         capabilities,
     })
@@ -117,16 +127,16 @@ const CAPABILITIES: &[&str] = &[
 struct Descriptor<'a> {
     machine_id: &'a str,
     label: &'a str,
-    platform: Platform,
+    platform: Platform<'a>,
     server_version: &'a str,
     orchestration_protocol_version: u32,
     capabilities: Map<String, Value>,
 }
 
 #[derive(Serialize)]
-struct Platform {
-    os: &'static str,
-    arch: &'static str,
+struct Platform<'a> {
+    os: &'a str,
+    arch: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     machine: Option<&'static str>,
 }
@@ -157,16 +167,16 @@ fn text_decode(b: &[u8]) -> String {
     String::from_utf8_lossy(b.strip_prefix(b"\xef\xbb\xbf").unwrap_or(b)).into_owned()
 }
 
-/// The engine's `packageJson.version`, or why Rust cannot reproduce this engine's descriptor.
-pub fn engine_version(
+/// Why Rust cannot reproduce this engine's descriptor, if it cannot.
+pub fn supported_engine(
     cfg: &EngineConfig,
     cwd: &Path,
     env: impl Fn(&str) -> Option<String>,
-) -> Result<String, String> {
+) -> Result<(), String> {
     if let Some(why) = super::auth_session::unsupported_engine(&cfg.args, &env) {
         return Err(why);
     }
-    // `process.platform`/`arch` and `argv[1]` below are Node's; other runtimes may differ.
+    // `argv[1]` below is Node's; other runtimes may differ.
     if Path::new(&cfg.command)
         .file_name()
         .is_none_or(|n| n != "node")
@@ -199,107 +209,128 @@ pub fn engine_version(
     {
         return Err(format!("{e} may report serverInstallation"));
     }
-    // Node bundles `apps/server/package.json`; the bundle sits in `apps/server/dist/`.
-    let pkg = entry
-        .parent()
-        .and_then(Path::parent)
-        .map(|d| d.join("package.json"))
-        .ok_or("no package.json above the engine script")?;
-    let text = std::fs::read_to_string(&pkg).map_err(|e| format!("{}: {e}", pkg.display()))?;
-    let v: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", pkg.display()))?;
-    match v["version"].as_str() {
-        Some(s) if !s.is_empty() && s.trim() == s => Ok(s.to_owned()),
-        _ => Err(format!("{}: no usable version", pkg.display())),
-    }
+    Ok(())
 }
 
+/// The generation a `Machine` was loaded for, and the `Machine`.
+type Cache = Arc<Mutex<Option<(u64, Arc<Machine>)>>>;
+
+/// Node fixes the descriptor at startup, so Rust's copy is per supervisor generation: once the
+/// engine is ready, a warmer fetches Node's own descriptor (version, os/arch), re-reads the machine
+/// id and runs the host probes. Until that succeeds for the current generation, Node answers.
 pub struct MachineDescriptor {
-    inner: Arc<Inner>,
-}
-
-struct Inner {
-    server_version: String,
-    /// Node reads it once at startup.
-    machine_id: OnceLock<String>,
-    /// Node probes once at startup.
-    facts: OnceLock<Facts>,
+    state: Arc<State>,
+    cache: Cache,
 }
 
 impl MachineDescriptor {
-    pub fn new(server_version: String) -> Self {
-        MachineDescriptor {
-            inner: Arc::new(Inner {
-                server_version,
-                machine_id: OnceLock::new(),
-                facts: OnceLock::new(),
-            }),
+    /// Spawns the warmer; needs a Tokio runtime.
+    pub fn start(state: Arc<State>, ctx: HandlerCtx, probe: Probe) -> Self {
+        let cache = Arc::new(Mutex::new(None));
+        tokio::spawn(warm(state.clone(), ctx, probe, cache.clone()));
+        MachineDescriptor { state, cache }
+    }
+}
+
+async fn warm(state: Arc<State>, ctx: HandlerCtx, probe: Probe, cache: Cache) {
+    let mut generation = state.generation_tx.subscribe();
+    loop {
+        let g = *generation.borrow_and_update();
+        if let Some(m) = load(&state, g, &ctx, &probe).await {
+            *cache.lock().unwrap() = Some((g, Arc::new(m)));
+        }
+        if generation.changed().await.is_err() {
+            return;
         }
     }
 }
 
-impl Inner {
-    fn answer(&self, ctx: &HandlerCtx) -> Option<Response<Bytes>> {
-        let machine_id = match self.machine_id.get() {
-            Some(id) => id,
-            None => {
-                // Missing or empty: Node creates it during its startup, so let Node answer.
-                let raw = std::fs::read_to_string(ctx.state_dir.join("machine-id")).ok()?;
-                let id = crate::machine::normalize(&raw)?.to_owned();
-                self.machine_id.get_or_init(|| id)
+/// `None` once generation `g` is over, or if a probe timed out.
+async fn load(state: &State, g: u64, ctx: &HandlerCtx, probe: &Probe) -> Option<Machine> {
+    let client = Client::builder(TokioExecutor::new()).build_http::<Body>();
+    loop {
+        if state.generation.load(Ordering::SeqCst) != g {
+            return None;
+        }
+        if state.engine_up.load(Ordering::SeqCst)
+            && let Some((server_version, os, arch)) = fetch(&client, ctx.engine_port).await
+        {
+            // Node created the id before it started listening.
+            let id = std::fs::read_to_string(ctx.state_dir.join("machine-id")).ok();
+            if let Some(machine_id) = id.as_deref().and_then(crate::machine::normalize) {
+                let platform = if os == "windows" {
+                    "win32".into()
+                } else {
+                    os.clone()
+                };
+                let (probe, cwd) = (probe.clone(), ctx.cwd.clone());
+                let facts = tokio::task::spawn_blocking(move || probe(&platform, &cwd))
+                    .await
+                    .ok()??;
+                return Some(Machine {
+                    machine_id: machine_id.to_owned(),
+                    label: facts.label,
+                    os,
+                    arch,
+                    machine: facts.machine,
+                    server_version,
+                });
             }
-        };
-        let facts = self.facts.get_or_init(|| probe(&ctx.cwd));
-        let body = descriptor_json(
-            machine_id,
-            facts,
-            &self.server_version,
-            agent_activity_publishing(&ctx.state_dir.join("secrets")),
-        );
-        Some(
-            Response::builder()
-                .status(200)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::VARY, "Accept-Encoding")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .body(Bytes::from(body))
-                .expect("valid response"),
-        )
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-/// The startup half of `ServerMachine.make`, on this host.
-fn probe(cwd: &Path) -> Facts {
+/// Node's own descriptor over loopback (not through the seam): `(serverVersion, os, arch)`.
+async fn fetch(
+    client: &Client<hyper_util::client::legacy::connect::HttpConnector, Body>,
+    port: u16,
+) -> Option<(String, String, String)> {
+    let req = Request::get(format!(
+        "http://127.0.0.1:{port}/.well-known/vekrel/machine"
+    ))
+    .body(Body::empty())
+    .ok()?;
+    let attempt = async {
+        let r = client.request(req).await.ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        axum::body::to_bytes(Body::new(r.into_body()), 1 << 20)
+            .await
+            .ok()
+    };
+    let body = tokio::time::timeout(Duration::from_secs(5), attempt)
+        .await
+        .ok()??;
+    let v: Value = serde_json::from_slice(&body).ok()?;
+    let s = |v: &Value| v.as_str().map(str::to_owned);
+    Some((
+        s(&v["serverVersion"])?,
+        s(&v["platform"]["os"])?,
+        s(&v["platform"]["arch"])?,
+    ))
+}
+
+/// The production `Probe`: the host's label and kind probes, as `ServerMachine.make` runs them.
+pub fn probe_host(platform: &str, cwd: &Path) -> Option<Facts> {
     use crate::machine::{hostname, kind, label, read_file, run_command};
-    let platform = match std::env::consts::OS {
-        "macos" => "darwin",
-        "windows" => "win32",
-        os => os,
+    let timed_out = std::cell::Cell::new(false);
+    let run = |c: &str, a: &[&str], t: Duration| {
+        run_command(c, a, t).unwrap_or_else(|_| {
+            timed_out.set(true);
+            None
+        })
     };
     let cwd_base = cwd
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    Facts {
-        label: label::resolve(
-            platform,
-            &run_command,
-            &read_file,
-            hostname().as_deref(),
-            &cwd_base,
-        ),
-        os: match platform {
-            "darwin" => "darwin",
-            "linux" => "linux",
-            "win32" => "windows",
-            _ => "unknown",
-        },
-        arch: match std::env::consts::ARCH {
-            "aarch64" => "arm64",
-            "x86_64" => "x64",
-            _ => "other",
-        },
-        machine: kind::detect(platform, &run_command, &read_file),
-    }
+    let facts = Facts {
+        label: label::resolve(platform, &run, &read_file, hostname().as_deref(), &cwd_base),
+        machine: kind::detect(platform, &run, &read_file),
+    };
+    (!timed_out.get()).then_some(facts)
 }
 
 impl RouteHandler for MachineDescriptor {
@@ -312,11 +343,26 @@ impl RouteHandler for MachineDescriptor {
         _req: &'a Parts,
         ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Response<Bytes>>> {
-        let (inner, ctx) = (self.inner.clone(), ctx.clone());
+        let g = self.state.generation.load(Ordering::SeqCst);
+        let m = match &*self.cache.lock().unwrap() {
+            Some((cg, m)) if *cg == g => m.clone(),
+            _ => return async { None }.boxed(),
+        };
+        let secrets = ctx.state_dir.join("secrets");
         async move {
-            tokio::task::spawn_blocking(move || inner.answer(&ctx))
-                .await
-                .ok()?
+            let publishing =
+                tokio::task::spawn_blocking(move || agent_activity_publishing(&secrets))
+                    .await
+                    .ok()?;
+            Some(
+                Response::builder()
+                    .status(200)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::VARY, "Accept-Encoding")
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .body(Bytes::from(descriptor_json(&m, publishing)))
+                    .expect("valid response"),
+            )
         }
         .boxed()
     }

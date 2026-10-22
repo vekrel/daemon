@@ -20,33 +20,50 @@ pub fn normalize(s: &str) -> Option<&str> {
     (!t.is_empty()).then_some(t)
 }
 
-pub fn run_command(command: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut child = Command::new(command)
+/// The probe ran past its timeout (and was killed).
+#[derive(Debug)]
+pub struct TimedOut;
+
+/// `Run` for real commands; `Err` on timeout so callers can tell it from a failure.
+pub fn run_command(
+    command: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Option<String>, TimedOut> {
+    let Ok(mut child) = Command::new(command)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    let mut out = child.stdout.take()?;
+    else {
+        return Ok(None);
+    };
+    let Some(mut out) = child.stdout.take() else {
+        return Ok(None);
+    };
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         out.read_to_end(&mut buf).map(|_| buf)
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
-        if let Some(s) = child.try_wait().ok()? {
-            break s;
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {}
+            Err(_) => return Ok(None),
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return None;
+            return Err(TimedOut);
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let buf = reader.join().ok()?.ok()?;
-    (status.code() == Some(0)).then(|| String::from_utf8_lossy(&buf).into_owned())
+    let Some(Ok(buf)) = reader.join().ok() else {
+        return Ok(None);
+    };
+    Ok((status.code() == Some(0)).then(|| String::from_utf8_lossy(&buf).into_owned()))
 }
 
 pub fn read_file(path: &str) -> Option<String> {

@@ -60,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    let state = Arc::new(supervisor::State::default());
     let mut seam = Seam::default();
     // WS handlers (Tasks 5/6) go here; each tag's mode comes from `[rust.handlers]`.
     let ws_handlers: Vec<Arc<dyn UnaryHandler>> = Vec::new();
@@ -99,19 +100,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let cwd = seam.ctx.cwd.clone();
-        match machine_descriptor::engine_version(&cfg.engine, &cwd, |k| std::env::var(k).ok()) {
+        match machine_descriptor::supported_engine(&cfg.engine, &cwd, |k| std::env::var(k).ok()) {
             Err(why) => {
                 tracing::warn!("GET /.well-known/vekrel/machine handler disabled: {why}")
             }
-            Ok(version) => {
+            // Off: no warmer either, so no probes run.
+            Ok(()) if cfg.rust.mode("GET /.well-known/vekrel/machine") == config::Mode::Off => {}
+            Ok(()) => {
                 let h: Arc<dyn RouteHandler> =
-                    Arc::new(machine_descriptor::MachineDescriptor::new(version));
+                    Arc::new(machine_descriptor::MachineDescriptor::start(
+                        state.clone(),
+                        seam.ctx.clone(),
+                        Arc::new(machine_descriptor::probe_host),
+                    ));
                 let mode = cfg.rust.mode(&http_seam::key(&*h));
                 seam = seam.with(mode, h);
             }
         }
     }
-    let state = Arc::new(supervisor::State::default());
     let engine = tokio::spawn(supervisor::run(cfg.engine, engine_port, state.clone()));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.server.port)).await?;
     let mut app = server::build_with_tap(
