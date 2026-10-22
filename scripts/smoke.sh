@@ -38,14 +38,19 @@ TOML
 "$ROOT/target/release/vekrel" serve --config "$VEKREL_HOME/vekrel.toml" --record > "$VEKREL_HOME/serve.log" 2>&1 &
 PID=$!
 
-# /healthz says "up" once the child is spawned; the machine endpoint answers only once Node is listening.
+# /healthz says "up" once the machine endpoint answers (polled every 250 ms), so allow it a moment.
 code=000
 for _ in $(seq 1 60); do
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/.well-known/vekrel/machine" || true)
   [ "$code" = 200 ] && break
   sleep 1
 done
-health=$(curl -s "http://127.0.0.1:$PORT/healthz" || true)
+health=
+for _ in $(seq 1 10); do
+  health=$(curl -s "http://127.0.0.1:$PORT/healthz" || true)
+  grep -q '"engine":"up"' <<<"$health" && break
+  sleep 0.3
+done
 echo "healthz: $health"
 echo "machine: $code"
 if [ "$code" != 200 ] || ! grep -q '"engine":"up"' <<<"$health"; then
