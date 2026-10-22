@@ -116,11 +116,34 @@ fn auth(e: &Env) -> Arc<AuthSession> {
 
 // ---- the test-only handler ----
 
-/// `test.echo` (`filesystem:read`): answers its payload; `{"fail":..}` fails with it;
-/// `{"wait":true}` waits for cancellation.
+/// `test.echo` (`filesystem:read`): answers its payload (or `payload.value`); `{"fail":..}`
+/// fails with it; `{"wait":true}` waits for cancellation; `{"sleep":true}` ignores the token and
+/// sleeps 5 s (`dropped` is set when the seam drops it).
 #[derive(Default)]
 struct Echo {
+    started: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl Echo {
+    /// Waits until a handler call has begun (an Interrupt before that never runs it at all).
+    async fn started(&self) {
+        for _ in 0..200 {
+            if self.started.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("handler never started");
+    }
+}
+
+struct SetOnDrop(Arc<AtomicBool>);
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl UnaryHandler for Echo {
@@ -140,10 +163,20 @@ impl UnaryHandler for Echo {
                 ctx.session.is_some(),
                 "handlers only run for verified sessions"
             );
+            self.started.store(true, Ordering::SeqCst);
             if payload.get("wait").is_some() {
+                // Set when cancelled, whether the token wakes it or the seam drops it first.
+                let _guard = SetOnDrop(self.cancelled.clone());
                 ctx.cancel.cancelled().await;
-                self.cancelled.store(true, Ordering::SeqCst);
                 return Ok(json!("too late"));
+            }
+            if payload.get("sleep").is_some() {
+                let _guard = SetOnDrop(self.dropped.clone());
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                return Ok(json!("slept"));
+            }
+            if let Some(v) = payload.get("value") {
+                return Ok(v.clone());
             }
             match payload.get("fail") {
                 Some(e) => Err(e.clone()),
@@ -181,8 +214,12 @@ async fn upstream(ev: UnboundedSender<String>) -> u16 {
                             }
                         }
                         let value = p.get("node").unwrap_or(p);
-                        let e = json!({"_tag":"Exit","requestId":r["id"],"exit":{"_tag":"Success","value":value}});
-                        s.send(AxMsg::Text(e.to_string().into())).await.unwrap();
+                        let mut e = json!({"_tag":"Exit","requestId":r["id"],"exit":{"_tag":"Success","value":value}}).to_string();
+                        // `nodeRaw`: Node's exit as exact text (spellings serde would not write).
+                        if let Some(raw) = p["nodeRaw"].as_str() {
+                            e = format!(r#"{{"_tag":"Exit","requestId":{},"exit":{raw}}}"#, r["id"]);
+                        }
+                        s.send(AxMsg::Text(e.into())).await.unwrap();
                     }
                 }
             })
@@ -532,6 +569,7 @@ async fn interrupt_for_owned_request_cancels_and_exits_interrupt() {
     let mut r = rig(seam(Mode::Serve, echo.clone(), Some(auth(&e)))).await;
     let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
     send(&mut c, &request(7, "test.echo", json!({"wait":true}))).await;
+    echo.started().await;
     send(&mut c, r#"{"_tag":"Ack","requestId":7}"#).await;
     send(&mut c, r#"{"_tag":"Interrupt","requestId":7}"#).await;
     assert_eq!(
@@ -667,5 +705,99 @@ async fn shadow_is_skipped_when_the_limiter_is_full() {
     assert!(
         logs.lines("outcome=\"match\"").is_empty(),
         "nothing was compared"
+    );
+}
+
+#[tokio::test]
+async fn shadow_compares_node_exit_bytes_exactly() {
+    let (logs, _g) = Logs::capture();
+    let e = env("rawexit", "[]");
+    let mut r = rig(seam(Mode::Shadow, Arc::default(), Some(auth(&e)))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    // Equal as numbers, but spelled differently (serde writes `1e+21`): a real byte mismatch that
+    // re-serializing Node's exit would hide.
+    let raw = r#"{"_tag":"Success","value":{"n":1e21}}"#;
+    send(
+        &mut c,
+        &request(1, "test.echo", json!({"value":{"n":1e21},"nodeRaw":raw})),
+    )
+    .await;
+    let _ = next_ev(&mut r).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(1, raw),
+        "the client gets Node's bytes"
+    );
+    barrier(&mut r, &mut c, 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let lines = logs.lines("rust shadow");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("mismatch") && lines[0].contains("$ (formatting)"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn interrupt_drops_a_handler_that_ignores_the_token() {
+    let e = env("sleepy", "[]");
+    let echo = Arc::new(Echo::default());
+    let mut r = rig(seam(Mode::Serve, echo.clone(), Some(auth(&e)))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.echo", json!({"sleep":true}))).await;
+    echo.started().await;
+    let t = std::time::Instant::now();
+    send(&mut c, r#"{"_tag":"Interrupt","requestId":1}"#).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(
+            1,
+            r#"{"_tag":"Failure","cause":[{"_tag":"Interrupt","fiberId":0}]}"#
+        )
+    );
+    assert!(t.elapsed() < Duration::from_secs(1));
+    for _ in 0..50 {
+        if echo.dropped.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        echo.dropped.load(Ordering::SeqCst),
+        "the handler future was dropped"
+    );
+    // No later Success: the next frame is the barrier's answer.
+    barrier(&mut r, &mut c, 2).await;
+}
+
+#[tokio::test]
+async fn duplicate_owned_id_is_dropped_like_node() {
+    let e = env("dup", "[]");
+    let echo = Arc::new(Echo::default());
+    let mut r = rig(seam(Mode::Serve, echo.clone(), Some(auth(&e)))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.echo", json!({"wait":true}))).await;
+    echo.started().await;
+    // Same id while the first still runs: consumed, unanswered, the first keeps its token.
+    send(&mut c, &request(1, "test.echo", json!({"a":1}))).await;
+    barrier(&mut r, &mut c, 2).await;
+    assert!(r.ev.try_recv().is_err(), "Node never sees the duplicate");
+    send(&mut c, r#"{"_tag":"Interrupt","requestId":1}"#).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(
+            1,
+            r#"{"_tag":"Failure","cause":[{"_tag":"Interrupt","fiberId":0}]}"#
+        )
+    );
+    for _ in 0..50 {
+        if echo.cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        echo.cancelled.load(Ordering::SeqCst),
+        "the first request's token was cancelled"
     );
 }

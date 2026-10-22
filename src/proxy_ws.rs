@@ -147,9 +147,11 @@ async fn pump<U>(
                     Message::Text(t) => rpc.c2s(t.as_str()),
                     _ => (Fwd::Original, Vec::new()),
                 };
+                let mut gone = false;
                 for f in local {
-                    if client.send(rust(f)).await.is_err() { break }
+                    if client.send(rust(f)).await.is_err() { gone = true; break }
                 }
+                if gone { break }
                 let sent = match fwd {
                     Fwd::Original => up.send(m).await,
                     Fwd::Text(t) => up.send(Message::text(t)).await,

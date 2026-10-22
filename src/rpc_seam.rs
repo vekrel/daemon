@@ -12,8 +12,13 @@ use crate::{
 };
 use axum::http::HeaderMap;
 use futures_util::future::BoxFuture;
-use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc};
+use serde::Deserialize;
+use serde_json::{Value, json, value::RawValue};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
@@ -131,9 +136,31 @@ pub(crate) struct Done {
 
 struct Shadowed {
     tag: &'static str,
-    rust: Option<Value>,
-    node: Option<Value>,
+    /// Rust's encoding of its exit.
+    rust: Option<String>,
+    /// Node's `exit`, exactly as it appeared in Node's frame.
+    node: Option<String>,
     cancel: CancellationToken,
+    since: Instant,
+}
+
+/// Shadow entries whose Exit never arrives from Node are dropped after this.
+const SHADOW_TTL: Duration = Duration::from_secs(600);
+
+/// An s2c message, borrowing `exit` as Node's exact bytes.
+#[derive(Deserialize)]
+struct NodeMsg<'a> {
+    #[serde(rename = "_tag")]
+    tag: Option<&'a str>,
+    #[serde(rename = "requestId", borrow)]
+    request_id: Option<&'a RawValue>,
+    #[serde(borrow)]
+    exit: Option<&'a RawValue>,
+}
+
+fn interrupted() -> Value {
+    // Research section 4: one Interrupt entry (Node repeats it per fiber).
+    failure(json!({"_tag": "Interrupt", "fiberId": 0}))
 }
 
 /// What to send upstream for a client frame.
@@ -220,9 +247,7 @@ impl Conn {
                     return false;
                 };
                 cancel.cancel();
-                // Research section 4: one Interrupt entry (Node repeats it per fiber).
-                let exit = failure(json!({"_tag": "Interrupt", "fiberId": 0}));
-                out.push(exit_frame(&m["requestId"], &exit));
+                out.push(exit_frame(&m["requestId"], &interrupted()));
                 true
             }
             _ => false,
@@ -258,6 +283,9 @@ impl Conn {
         let cancel = CancellationToken::new();
         let payload = m.get("payload").cloned().unwrap_or(Value::Null);
         match mode {
+            // RpcServer `handleRequest`: an id already running is dropped, unanswered.
+            Mode::Serve if self.owned.contains_key(&key) => true,
+            Mode::Shadow if self.shadow.contains_key(&key) => false,
             Mode::Serve => {
                 let Some(s) = session else {
                     out.push(exit_frame(id, &denied()));
@@ -276,14 +304,22 @@ impl Conn {
                 true
             }
             Mode::Shadow => {
+                self.shadow.retain(|_, s| {
+                    let live = s.since.elapsed() < SHADOW_TTL;
+                    if !live {
+                        s.cancel.cancel();
+                    }
+                    live
+                });
                 let mut entry = Shadowed {
                     tag: h.tag(),
                     rust: None,
                     node: None,
                     cancel: cancel.clone(),
+                    since: Instant::now(),
                 };
                 match session {
-                    None => entry.rust = Some(denied()),
+                    None => entry.rust = Some(denied().to_string()),
                     Some(s) => {
                         let run = self.run(h, payload, s, cancel);
                         let Some(task) =
@@ -315,13 +351,18 @@ impl Conn {
     ) -> impl Future<Output = Value> + Send + 'static {
         let ctx = HandlerCtx {
             session: Some(session),
-            cancel,
+            cancel: cancel.clone(),
             ..self.seam.ctx.clone()
         };
         async move {
-            match h.handle(payload, &ctx).await {
-                Ok(v) => success(v),
-                Err(e) => failure(json!({"_tag": "Fail", "error": e})),
+            // Cancellation drops the handler even if it never looks at the token.
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => interrupted(),
+                r = h.handle(payload, &ctx) => match r {
+                    Ok(v) => success(v),
+                    Err(e) => failure(json!({"_tag": "Fail", "error": e})),
+                },
             }
         }
     }
@@ -335,7 +376,7 @@ impl Conn {
             None => drop(self.shadow.remove(&d.key)),
             Some(exit) => {
                 if let Some(s) = self.shadow.get_mut(&d.key) {
-                    s.rust = Some(exit);
+                    s.rust = Some(exit.to_string());
                     self.settle(d.key);
                 }
             }
@@ -348,42 +389,45 @@ impl Conn {
         if self.shadow.is_empty() || !text.contains("\"Exit\"") {
             return;
         }
-        let msgs = match serde_json::from_str::<Value>(text) {
-            Ok(Value::Array(a)) => a,
-            Ok(v) => vec![v],
-            Err(_) => return,
+        let msgs = if text.trim_start().starts_with('[') {
+            serde_json::from_str::<Vec<NodeMsg>>(text)
+        } else {
+            serde_json::from_str::<NodeMsg>(text).map(|m| vec![m])
         };
-        for mut m in msgs {
-            if m["_tag"] != "Exit" {
+        for m in msgs.into_iter().flatten() {
+            let (Some("Exit"), Some(id), Some(exit)) = (m.tag, m.request_id, m.exit) else {
                 continue;
-            }
-            let key = m["requestId"].to_string();
+            };
+            // Same key as the request's: the id's JSON as serde writes it.
+            let Ok(id) = serde_json::from_str::<Value>(id.get()) else {
+                continue;
+            };
+            let key = id.to_string();
             if let Some(s) = self.shadow.get_mut(&key) {
-                s.node = Some(m["exit"].take());
+                s.node = Some(exit.get().to_owned());
                 self.settle(key);
             }
         }
     }
 
-    /// Compares and logs once both answers are in; logs name the JSON path, never values.
+    /// Compares Node's exact `exit` bytes with Rust's encoding once both are in; logs name the
+    /// JSON path, never values.
     fn settle(&mut self, key: String) {
         let Some(Shadowed {
             rust: Some(rust),
             node: Some(node),
+            tag,
             ..
         }) = self.shadow.get(&key)
         else {
             return;
         };
-        // shortcut: compares Node's exit as re-serialized by serde (same key order, compact);
-        // number spellings JSON.stringify writes differently (e.g. 1e21) would show as a mismatch.
-        let (node, rust) = (node.to_string(), rust.to_string());
-        let tag = self.shadow.remove(&key).expect("present").tag;
         if node == rust {
             tracing::info!(tag, outcome = "match", "rust shadow");
         } else {
             let path = json_path(node.as_bytes(), rust.as_bytes());
             tracing::warn!(tag, outcome = "mismatch", path, "rust shadow");
         }
+        self.shadow.remove(&key);
     }
 }
