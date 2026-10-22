@@ -5,6 +5,7 @@ use std::sync::{Arc, atomic::Ordering};
 
 /// Where the Node engine listens (always loopback).
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // fields are read by the proxy routes added in later tasks
 pub struct Upstream {
     pub host: &'static str,
     pub port: u16,
