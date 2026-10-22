@@ -1,5 +1,6 @@
-//! Differential test against the real engine: `GET /api/auth/session` through the daemon in
-//! shadow mode must log a `match` for every request and no `mismatch`.
+//! Differential tests against the real engine: `GET /api/auth/session` and
+//! `GET /.well-known/vekrel/machine` through the daemon in shadow mode must log a `match` for
+//! every request and no `mismatch`.
 //!
 //! Ignored unless `VEKREL_LIVE_ENGINE` is the engine's `apps/server/dist/bin.mjs`:
 //! `VEKREL_LIVE_ENGINE=/path/to/bin.mjs cargo test --test live_differential -- --ignored --nocapture`
@@ -59,15 +60,15 @@ fn curl(args: &[&str]) -> (u16, String) {
     (code.parse().unwrap_or(0), body.to_owned())
 }
 
-#[test]
-#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
-fn auth_session_shadow_matches_node() {
+/// Starts the daemon over the real engine with every handler in shadow mode and waits until the
+/// engine answers and has printed its pairing token. `None` when `VEKREL_LIVE_ENGINE` is unset.
+fn start(tag: &str) -> Option<(Daemon, String, PathBuf, String)> {
     let Ok(bin) = std::env::var("VEKREL_LIVE_ENGINE") else {
         eprintln!("VEKREL_LIVE_ENGINE unset; skipping");
-        return;
+        return None;
     };
     let (public, engine) = (free_port(), free_port());
-    let home = std::env::temp_dir().join(format!("vekrel-live-{}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("vekrel-live-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
     let cfg = home.join("vekrel.toml");
@@ -75,7 +76,8 @@ fn auth_session_shadow_matches_node() {
         &cfg,
         format!(
             "[server]\nport = {public}\n[engine]\ncommand = \"node\"\nargs = [{bin:?}]\nport = {engine}\n\
-             [rust.handlers]\n\"GET /api/auth/session\" = \"shadow\"\n"
+             [rust.handlers]\n\"GET /api/auth/session\" = \"shadow\"\n\
+             \"GET /.well-known/vekrel/machine\" = \"shadow\"\n"
         ),
     )
     .unwrap();
@@ -95,9 +97,6 @@ fn auth_session_shadow_matches_node() {
         home: home.clone(),
     };
     let base = format!("http://127.0.0.1:{public}");
-    let url = format!("{base}/api/auth/session");
-
-    // Ready once the engine answers through the proxy and has printed its pairing token.
     let deadline = Instant::now() + Duration::from_secs(90);
     let token = loop {
         assert!(
@@ -111,11 +110,84 @@ fn auth_session_shadow_matches_node() {
                 .take_while(|c| c.is_ascii_alphanumeric() || "-_".contains(*c))
                 .collect::<String>()
         });
-        if let (Some(t), (200, _)) = (tok, curl(&[&format!("{base}/.well-known/vekrel/machine")])) {
+        // /healthz is the daemon's own route, so readiness polls add no shadow log lines.
+        let (_, health) = curl(&[&format!("{base}/healthz")]);
+        if let (Some(t), true) = (tok, health.contains(r#""engine":"up""#)) {
             break t;
         }
         std::thread::sleep(Duration::from_millis(500));
     };
+    Some((d, base, home, token))
+}
+
+/// (matches, mismatches) among the shadow log lines for `route`; prints mismatching lines.
+fn shadow_counts(home: &Path, route: &str) -> (usize, usize) {
+    std::thread::sleep(Duration::from_millis(300));
+    let l = log(home);
+    let tag = format!("route=\"{route}\"");
+    let shadow: Vec<&str> = l
+        .lines()
+        .filter(|l| l.contains("rust shadow") && l.contains(&tag))
+        .collect();
+    let mismatches = shadow.iter().filter(|l| !l.contains("\"match\"")).count();
+    for s in shadow.iter().filter(|l| !l.contains("\"match\"")) {
+        println!("{s}");
+    }
+    (shadow.len() - mismatches, mismatches)
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn machine_descriptor_shadow_matches_node() {
+    let Some((d, base, home, _)) = start("machine") else {
+        return;
+    };
+    let url = format!("{base}/.well-known/vekrel/machine");
+    let get = |n: usize| {
+        for _ in 0..n {
+            let (code, body) = curl(&[&url]);
+            assert_eq!(code, 200);
+            assert!(body.starts_with(r#"{"machineId":""#), "{body}");
+        }
+    };
+    get(9);
+    // Node's headers, which serve mode copies (besides length and date).
+    let (_, raw) = curl(&["-D", "-", "-o", "/dev/null", &url]);
+    let raw = raw.to_ascii_lowercase();
+    for h in [
+        "content-type: application/json",
+        "vary: accept-encoding",
+        "access-control-allow-origin: *",
+    ] {
+        assert!(raw.contains(h), "{h} missing:\n{raw}");
+    }
+    // agentActivityPublishing is read per request: turn it on with a relay that never resolves.
+    let secrets = home.join("userdata/secrets");
+    for (n, v) in [
+        ("cloud-publish-agent-activity", "true"),
+        ("cloud-relay-url", "wss://relay.invalid"),
+        ("cloud-relay-machine-credential", "test-credential"),
+    ] {
+        std::fs::write(secrets.join(format!("{n}.bin")), v).unwrap();
+    }
+    let (_, body) = curl(&[&url]);
+    assert!(body.contains(r#""agentActivityPublishing":true"#), "{body}");
+    get(9);
+    let (matches, mismatches) = shadow_counts(&home, "GET /.well-known/vekrel/machine");
+    println!("machine shadow log: {matches} match, {mismatches} mismatch");
+    assert_eq!(mismatches, 0);
+    assert_eq!(matches, 20, "every request compared");
+    drop(d);
+    assert!(!home.exists());
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn auth_session_shadow_matches_node() {
+    let Some((d, base, home, token)) = start("auth") else {
+        return;
+    };
+    let url = format!("{base}/api/auth/session");
 
     // Pair: the engine sets its session cookie; keep the token.
     let jar = home.join("jar");
@@ -170,7 +242,7 @@ fn auth_session_shadow_matches_node() {
         ),
         (
             "cookie via proxy origin",
-            vec![cookie.clone(), format!("origin: http://127.0.0.1:{public}")],
+            vec![cookie.clone(), format!("origin: {base}")],
             true,
         ),
     ];
@@ -209,17 +281,8 @@ fn auth_session_shadow_matches_node() {
     cases.push(("revoked row", vec![cookie], false));
     run(&mut cases);
 
-    std::thread::sleep(Duration::from_millis(300));
-    let l = log(&home);
-    let shadow: Vec<&str> = l.lines().filter(|l| l.contains("rust shadow")).collect();
-    let mismatches = shadow.iter().filter(|l| l.contains("mismatch")).count();
-    let matches = shadow.iter().filter(|l| l.contains("\"match\"")).count();
+    let (matches, mismatches) = shadow_counts(&home, "GET /api/auth/session");
     println!("shadow log: {matches} match, {mismatches} mismatch");
-    for s in &shadow {
-        if s.contains("mismatch") {
-            println!("{s}");
-        }
-    }
     assert_eq!(mismatches, 0);
     assert_eq!(matches, 9, "every request compared");
     drop(d);

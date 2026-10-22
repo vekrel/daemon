@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
-    handlers::{HandlerCtx, auth_session},
+    handlers::{HandlerCtx, auth_session, machine_descriptor},
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
@@ -78,6 +78,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let desc = auth_session::Descriptor::web("127.0.0.1", engine_port, dir, "");
                 let h: Arc<dyn RouteHandler> =
                     Arc::new(auth_session::AuthSession::new(desc, files.clone()));
+                let mode = cfg.rust.mode(&http_seam::key(&*h));
+                seam = seam.with(mode, h);
+            }
+        }
+        let cwd = seam.ctx.cwd.clone();
+        match machine_descriptor::engine_version(&cfg.engine, &cwd, |k| std::env::var(k).ok()) {
+            Err(why) => {
+                tracing::warn!("GET /.well-known/vekrel/machine handler disabled: {why}")
+            }
+            Ok(version) => {
+                let h: Arc<dyn RouteHandler> =
+                    Arc::new(machine_descriptor::MachineDescriptor::new(version));
                 let mode = cfg.rust.mode(&http_seam::key(&*h));
                 seam = seam.with(mode, h);
             }

@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod handlers;
 pub mod http_seam;
+pub mod machine;
 pub mod proxy_http;
 pub mod proxy_ws;
 pub mod recorder;
