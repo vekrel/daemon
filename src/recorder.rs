@@ -1,0 +1,153 @@
+//! `--record`: appends every proxied WS text frame to an NDJSON file, off the forwarding path.
+use crate::proxy_ws::{Dir, FrameTap};
+use serde::Serialize;
+use std::{
+    fs::{self, File},
+    hash::{BuildHasher, RandomState},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+    },
+    thread,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio_tungstenite::tungstenite::Message;
+
+/// Frames queued for the writer before new ones are dropped (and counted).
+const QUEUE: usize = 4096;
+
+pub struct Recorder {
+    path: PathBuf,
+    tx: SyncSender<(u64, Dir, String)>,
+    dropped: AtomicU64,
+    skipped: AtomicU64,
+}
+
+#[derive(Serialize)]
+struct Line<'a> {
+    t: u64,
+    dir: &'a str,
+    frame: &'a str,
+}
+
+impl Recorder {
+    /// Opens `<dir>/<YYYYMMDDTHHMMSSZ>-<8 hex>.ndjson` and starts its writer thread.
+    pub fn create(dir: &Path) -> io::Result<Self> {
+        fs::create_dir_all(dir)?;
+        let secs = now_ms() / 1000;
+        let rand = RandomState::new().hash_one(secs) as u32;
+        let path = dir.join(format!("{}-{rand:08x}.ndjson", iso_basic(secs)));
+        let file = File::options().write(true).create_new(true).open(&path)?;
+        let (tx, rx) = sync_channel(QUEUE);
+        thread::Builder::new()
+            .name("vekrel-recorder".into())
+            .spawn(move || write_loop(rx, BufWriter::new(file)))?;
+        tracing::info!("recording ws frames to {}", path.display());
+        Ok(Self {
+            path,
+            tx,
+            dropped: AtomicU64::new(0),
+            skipped: AtomicU64::new(0),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Frames lost because the writer fell `QUEUE` frames behind.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Non-text frames (binary, ping, pong, close) seen and not recorded.
+    pub fn skipped(&self) -> u64 {
+        self.skipped.load(Ordering::Relaxed)
+    }
+}
+
+impl FrameTap for Recorder {
+    fn on_frame(&self, dir: Dir, frame: &Message) {
+        // Effect RPC is text-only; other frames are counted, not recorded.
+        let Message::Text(text) = frame else {
+            self.skipped.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        match self.tx.try_send((now_ms(), dir, text.as_str().to_owned())) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::warn!("recorder queue full, {n} frames dropped so far");
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+fn write_loop(rx: Receiver<(u64, Dir, String)>, mut out: BufWriter<File>) {
+    let write = |out: &mut BufWriter<File>, (t, dir, frame): (u64, Dir, String)| {
+        let dir = match dir {
+            Dir::C2s => "c2s",
+            Dir::S2c => "s2c",
+        };
+        serde_json::to_writer(
+            &mut *out,
+            &Line {
+                t,
+                dir,
+                frame: &frame,
+            },
+        )?;
+        out.write_all(b"\n")
+    };
+    while let Ok(item) = rx.recv() {
+        // Drain what is queued, then flush once, so the file is current whenever the queue is idle.
+        let res = write(&mut out, item)
+            .and_then(|()| rx.try_iter().try_for_each(|i| write(&mut out, i)))
+            .and_then(|()| out.flush());
+        if let Err(e) = res {
+            tracing::error!("recorder write failed, recording stopped: {e}");
+            return;
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// ISO 8601 basic format, UTC (no colons, so the name is valid on every filesystem).
+fn iso_basic(secs: u64) -> String {
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // Howard Hinnant's civil_from_days.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (h, mi, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
+    format!("{y:04}{m:02}{d:02}T{h:02}{mi:02}{s:02}Z")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn iso_basic() {
+        assert_eq!(super::iso_basic(0), "19700101T000000Z");
+        assert_eq!(super::iso_basic(1_792_670_645), "20261022T120405Z");
+        assert_eq!(super::iso_basic(951_782_400), "20000229T000000Z");
+    }
+}
