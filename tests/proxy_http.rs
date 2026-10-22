@@ -12,6 +12,10 @@ use vekrel::{server, supervisor::State};
 
 async fn serve(app: Router) -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    serve_on(l, app)
+}
+
+fn serve_on(l: TcpListener, app: Router) -> u16 {
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
         axum::serve(
@@ -26,11 +30,13 @@ async fn serve(app: Router) -> u16 {
 
 /// Starts the proxy under test in front of `upstream_port`; returns its base URL.
 async fn proxy(upstream_port: u16) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
     let app = server::build(
         Arc::new(State::default()),
-        server::Upstream::loopback(upstream_port),
+        server::Upstream::loopback(upstream_port).with_public_port(port),
     );
-    format!("http://127.0.0.1:{}", serve(app).await)
+    format!("http://127.0.0.1:{}", serve_on(l, app))
 }
 
 type Seen = Arc<Mutex<Option<(String, String, HeaderMap, String)>>>;
@@ -238,4 +244,28 @@ async fn client_supplied_forwarded_host_is_overwritten() {
     assert_eq!(h["x-forwarded-host"], base.trim_start_matches("http://"));
     assert_eq!(h["x-forwarded-proto"], "http");
     assert_eq!(h["x-forwarded-for"], "10.0.0.9, 127.0.0.1");
+}
+
+async fn forwarded_host_seen_with_client_host(host: impl Fn(&str) -> String) {
+    let (up, seen) = header_probe().await;
+    let base = proxy(up).await;
+    let port = base.rsplit(':').next().unwrap();
+    reqwest::Client::new()
+        .get(format!("{base}/x"))
+        .header("host", host(port))
+        .header("x-forwarded-host", "127.0.0.1:1")
+        .send()
+        .await
+        .unwrap();
+    assert!(seen.lock().await.get("x-forwarded-host").is_none());
+}
+
+#[tokio::test]
+async fn forwarded_host_omitted_for_non_loopback_host() {
+    forwarded_host_seen_with_client_host(|p| format!("evil.example:{p}")).await;
+}
+
+#[tokio::test]
+async fn forwarded_host_omitted_for_wrong_port() {
+    forwarded_host_seen_with_client_host(|_| "127.0.0.1:1".into()).await;
 }

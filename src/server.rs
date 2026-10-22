@@ -16,15 +16,23 @@ use std::sync::{Arc, atomic::Ordering};
 pub struct Upstream {
     pub host: &'static str,
     pub port: u16,
+    /// The port clients reach this proxy on; only loopback hosts on it are forwarded as X-Forwarded-Host.
+    pub public_port: u16,
     pub client: Client<HttpConnector, Body>,
 }
 
 impl Upstream {
+    pub fn with_public_port(mut self, public_port: u16) -> Self {
+        self.public_port = public_port;
+        self
+    }
+
     pub fn loopback(port: u16) -> Self {
         let client = Client::builder(TokioExecutor::new()).build_http();
         Self {
             host: "127.0.0.1",
             port,
+            public_port: 0,
             client,
         }
     }

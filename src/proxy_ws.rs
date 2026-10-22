@@ -73,6 +73,7 @@ pub async fn handler(
     add_forwarded(
         req.headers_mut(),
         headers.get(header::HOST).cloned(),
+        ctx.upstream.public_port,
         conn.map(|c| c.0.0.ip()),
     );
 

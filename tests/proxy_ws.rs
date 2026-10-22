@@ -33,7 +33,10 @@ impl Drop for Guard {
 }
 
 async fn serve(app: Router) -> (u16, Guard) {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    serve_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), app)
+}
+
+fn serve_on(l: TcpListener, app: Router) -> (u16, Guard) {
     let port = l.local_addr().unwrap().port();
     let h = tokio::spawn(async move {
         axum::serve(
@@ -112,7 +115,10 @@ async fn rig() -> Rig {
     let (tx, ev) = unbounded_channel();
     let (up, g1) = fake_upstream(tx).await;
     let state = Arc::new(State::default());
-    let (proxy, g2) = serve(server::build(state.clone(), server::Upstream::loopback(up))).await;
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public = l.local_addr().unwrap().port();
+    let upstream = server::Upstream::loopback(up).with_public_port(public);
+    let (proxy, g2) = serve_on(l, server::build(state.clone(), upstream));
     Rig {
         state,
         ev,
@@ -262,4 +268,18 @@ async fn ws_upgrade_carries_forwarded_host() {
         event(&mut r.ev).await,
         format!("fwd:127.0.0.1:{}|http|127.0.0.1", r.proxy)
     );
+}
+
+#[tokio::test]
+async fn ws_forwarded_host_omitted_for_non_loopback_host() {
+    let mut r = rig().await;
+    let mut req = format!("ws://127.0.0.1:{}/ws?fwd=1", r.proxy)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("host", format!("evil.example:{}", r.proxy).parse().unwrap());
+    let _c = connect_async(req).await.expect("handshake").0;
+    event(&mut r.ev).await; // query
+    event(&mut r.ev).await; // cookie
+    assert_eq!(event(&mut r.ev).await, "fwd:|http|127.0.0.1");
 }
