@@ -157,6 +157,7 @@ async fn handler_reads_machine_id_once_and_publishing_per_request() {
         cwd: d.clone(),
         state_dir: state.clone(),
         engine_port: 1,
+        ..HandlerCtx::default()
     };
     let h = MachineDescriptor::new("9.8.7".into());
     let (parts, ()) = Request::get("/.well-known/vekrel/machine")

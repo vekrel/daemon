@@ -12,7 +12,56 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{
+    sync::{Semaphore, oneshot},
+    task::JoinHandle,
+};
+
+/// Caps shadow computations across both seams: at most `permits` at once, each cut off after
+/// `timeout`. When full, the comparison is skipped; the client is never affected.
+#[derive(Clone, Debug)]
+pub struct ShadowLimit {
+    permits: Arc<Semaphore>,
+    timeout: std::time::Duration,
+}
+
+impl Default for ShadowLimit {
+    fn default() -> Self {
+        ShadowLimit::new(64, std::time::Duration::from_secs(10))
+    }
+}
+
+impl ShadowLimit {
+    pub fn new(permits: usize, timeout: std::time::Duration) -> Self {
+        ShadowLimit {
+            permits: Arc::new(Semaphore::new(permits)),
+            timeout,
+        }
+    }
+
+    /// Spawns `fut` under a permit and the timeout (`None` on timeout); `None` without spawning,
+    /// logged as `shadow_skipped_busy`, when every permit is taken. Never waits.
+    pub fn spawn<T: Send + 'static>(
+        &self,
+        handler: &str,
+        fut: impl Future<Output = Option<T>> + Send + 'static,
+    ) -> Option<JoinHandle<Option<T>>> {
+        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+            tracing::info!(handler, outcome = "shadow_skipped_busy", "rust shadow");
+            return None;
+        };
+        let (timeout, handler) = (self.timeout, handler.to_owned());
+        Some(tokio::spawn(async move {
+            let _permit = permit;
+            tokio::time::timeout(timeout, fut)
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(handler, outcome = "shadow_timeout", "rust shadow");
+                    None
+                })
+        }))
+    }
+}
 
 pub trait RouteHandler: Send + Sync {
     fn method_path(&self) -> (Method, &'static str);
@@ -203,7 +252,27 @@ fn first_diff(a: &Value, b: &Value, path: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::json_path;
+    use super::{ShadowLimit, json_path};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn shadow_limit_skips_when_full_and_times_out() {
+        let l = ShadowLimit::new(1, Duration::from_millis(50));
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let slow = l
+            .spawn("a", async move { rx.await.ok() })
+            .expect("first gets the permit");
+        assert!(l.spawn("b", async { Some(()) }).is_none(), "full: skipped");
+        drop(tx);
+        assert_eq!(slow.await.unwrap(), None);
+        // The permit is back; a computation past the timeout yields None.
+        let stuck = l.spawn("c", std::future::pending::<Option<()>>()).unwrap();
+        assert_eq!(stuck.await.unwrap(), None);
+        assert_eq!(
+            l.spawn("d", async { Some(1) }).unwrap().await.unwrap(),
+            Some(1)
+        );
+    }
 
     #[test]
     fn json_path_names_the_first_difference() {

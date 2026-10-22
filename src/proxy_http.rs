@@ -111,9 +111,15 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     }
     // Shadow: Rust runs beside Node and never delays Node's answer.
     let (seam, rust_parts, route) = (upstream.seam.clone(), parts.clone(), http_seam::key(&*h));
-    let rust = tokio::spawn(async move { h.handle(&rust_parts, &seam.ctx).await });
+    let rust = upstream.shadow.spawn(
+        &route,
+        async move { h.handle(&rust_parts, &seam.ctx).await },
+    );
     let node = forward(&upstream, Request::from_parts(parts, body)).await;
-    http_seam::tee(node, rust, route)
+    match rust {
+        Some(rust) => http_seam::tee(node, rust, route),
+        None => node,
+    }
 }
 
 async fn forward(upstream: &Upstream, req: Request<Body>) -> Response<Body> {

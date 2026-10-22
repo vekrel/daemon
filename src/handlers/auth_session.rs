@@ -172,7 +172,35 @@ impl AuthSession {
         })
     }
 
-    fn respond(&self, s: Option<Verified>) -> Response<Bytes> {
+    /// The session Node's `authenticateWebSocketUpgrade` derives, given the headers and query
+    /// Node sees on the proxied upgrade. Node already accepted the socket, so a credential it
+    /// would reject means Rust's view is wrong: `Unverified`, which denies.
+    pub async fn ws_session(&self, h: &HeaderMap, query: Option<&str>) -> WsSession {
+        // shortcut: any `wsTicket` key (or a %/+-encoded key that might decode to it) defers, even
+        // when Node would ignore an empty one; deferring is always safe.
+        let ticket = query.is_some_and(|q| {
+            q.split('&')
+                .map(|p| p.split_once('=').map_or(p, |kv| kv.0))
+                .any(|k| k == "wsTicket" || k.contains(['%', '+']))
+        });
+        let dpop = h
+            .get_all(header::AUTHORIZATION)
+            .iter()
+            .any(|v| v.as_bytes().starts_with(b"DPoP "));
+        if ticket || dpop {
+            return WsSession::Deferred;
+        }
+        let Some(Cred::Token { token, dpop }) = self.credential(h) else {
+            return WsSession::Unverified;
+        };
+        let files = self.files.clone();
+        match tokio::task::spawn_blocking(move || verify(&files, &token, dpop.as_deref())).await {
+            Ok(Some(Some(v))) => WsSession::Verified(v),
+            _ => WsSession::Unverified,
+        }
+    }
+
+    fn respond(&self, s: Option<VerifiedSession>) -> Response<Bytes> {
         let body = match &s {
             None => serde_json::to_vec(&SessionState {
                 authenticated: false,
@@ -238,15 +266,28 @@ const LEGACY_SCOPES: [&str; 8] = [
     "relay:write",
 ];
 
-struct Verified {
-    scopes: Vec<String>,
-    method: String,
-    exp: i64,
+/// A session as `SessionStore.verify` returns it: scopes, method and expiry from the token claims.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedSession {
+    pub scopes: Vec<String>,
+    pub method: String,
+    /// Epoch milliseconds.
+    pub exp: i64,
+}
+
+/// A WS connection's session, from the upgrade request's credentials.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WsSession {
+    Verified(VerifiedSession),
+    /// No credential, a credential Node would reject, or key/DB unreadable: Rust denies.
+    Unverified,
+    /// A `wsTicket` or a DPoP proof: only Node can verify these, so Node answers.
+    Deferred,
 }
 
 /// `SessionStore.verify` + `rejectMcpClientAudience` + the DPoP checks. `Some(None)`: a
 /// credential error (unauthenticated); `None`: Node answers (files unavailable, DPoP proof).
-fn verify(files: &AuthFiles, t: &str, dpop: Option<&str>) -> Option<Option<Verified>> {
+fn verify(files: &AuthFiles, t: &str, dpop: Option<&str>) -> Option<Option<VerifiedSession>> {
     let key = files.key()?;
     let Ok(p) = token::verify(t, &key) else {
         return Some(None);
@@ -271,7 +312,7 @@ fn verify(files: &AuthFiles, t: &str, dpop: Option<&str>) -> Option<Option<Verif
         (true, _) | (false, Some(_)) => return Some(None),
         (false, None) => {}
     }
-    Some(Some(Verified {
+    Some(Some(VerifiedSession {
         scopes: p.scopes,
         method: p.method,
         exp: p.exp,

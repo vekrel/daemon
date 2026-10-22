@@ -1,5 +1,6 @@
 use crate::{
     proxy_http::{add_forwarded, error, strip_hop_by_hop},
+    rpc_seam::{Conn, Fwd},
     server::Upstream,
     supervisor::State,
 };
@@ -20,7 +21,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -86,6 +87,10 @@ pub async fn handler(
         conn.map(|c| c.0.0.ip()),
     );
 
+    // The session Node sees on this upgrade; only computed when Rust claims some RPC tag.
+    let rpc = ctx.upstream.rpc.clone();
+    let session = rpc.session(req.headers(), uri.query()).await;
+
     let dial = tokio::time::timeout(ctx.upstream.dial_timeout, connect_async(req));
     let (up, res) = match dial.await {
         Err(_) => return error(StatusCode::GATEWAY_TIMEOUT, "engine_timeout"),
@@ -106,7 +111,9 @@ pub async fn handler(
     };
     ws.on_upgrade(move |client| {
         let conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
-        pump(client, up, generation, shutdown, ctx.tap, conn)
+        let (done_tx, done) = mpsc::unbounded_channel();
+        let rpc = Conn::new(rpc, session, done_tx, ctx.upstream.shadow.clone());
+        pump(client, up, generation, shutdown, ctx.tap, conn, (rpc, done))
     })
 }
 
@@ -117,10 +124,18 @@ async fn pump<U>(
     mut shutdown: watch::Receiver<bool>,
     tap: Arc<dyn FrameTap>,
     conn: u64,
+    // Routing state, and where its spawned handlers report back.
+    (mut rpc, mut done): (Conn, mpsc::UnboundedReceiver<crate::rpc_seam::Done>),
 ) where
     U: StreamExt<Item = Result<Message, WsError>> + SinkExt<Message, Error = WsError> + Unpin,
 {
     // One loop, no buffering: each frame is written the moment it is read (Effect pings every 5 s).
+    // This loop is the client socket's only writer, so Rust's frames and Node's never interleave.
+    let rust = |m: String| {
+        let m = Message::text(m);
+        tap.on_frame(conn, Dir::S2c, &m);
+        to_axum(m)
+    };
     loop {
         tokio::select! {
             m = client.next() => {
@@ -128,7 +143,19 @@ async fn pump<U>(
                 let m = from_axum(m);
                 tap.on_frame(conn, Dir::C2s, &m);
                 let close = m.is_close();
-                if up.send(m).await.is_err() || close { break }
+                let (fwd, local) = match &m {
+                    Message::Text(t) => rpc.c2s(t.as_str()),
+                    _ => (Fwd::Original, Vec::new()),
+                };
+                for f in local {
+                    if client.send(rust(f)).await.is_err() { break }
+                }
+                let sent = match fwd {
+                    Fwd::Original => up.send(m).await,
+                    Fwd::Text(t) => up.send(Message::text(t)).await,
+                    Fwd::Nothing => Ok(()),
+                };
+                if sent.is_err() || close { break }
             }
             m = up.next() => {
                 let Some(Ok(m)) = m else {
@@ -138,8 +165,15 @@ async fn pump<U>(
                     break;
                 };
                 tap.on_frame(conn, Dir::S2c, &m);
+                if let Message::Text(t) = &m {
+                    rpc.s2c(t.as_str());
+                }
                 let close = m.is_close();
                 if client.send(to_axum(m)).await.is_err() || close { break }
+            }
+            Some(d) = done.recv() => {
+                if let Some(f) = rpc.done(d)
+                    && client.send(rust(f)).await.is_err() { break }
             }
             _ = generation.changed() => {
                 let f = AxClose { code: 1012, reason: "engine restarted".into() };

@@ -1,7 +1,8 @@
 use crate::{
-    http_seam::Seam,
+    http_seam::{Seam, ShadowLimit},
     proxy_http,
     proxy_ws::{self, FrameTap, NoTap},
+    rpc_seam,
     supervisor::State,
 };
 use axum::{Json, Router, body::Body, extract::State as AxState, routing::get};
@@ -27,6 +28,10 @@ pub struct Upstream {
     pub dial_timeout: Duration,
     /// Routes Rust shadows or serves; empty means everything goes to the engine.
     pub seam: Arc<Seam>,
+    /// Unary RPC tags Rust shadows or serves over `/ws`.
+    pub rpc: Arc<rpc_seam::Seam>,
+    /// Shared by both seams' shadow computations.
+    pub shadow: ShadowLimit,
 }
 
 impl Upstream {
@@ -45,6 +50,16 @@ impl Upstream {
         self
     }
 
+    pub fn with_rpc_seam(mut self, seam: rpc_seam::Seam) -> Self {
+        self.rpc = Arc::new(seam);
+        self
+    }
+
+    pub fn with_shadow_limit(mut self, shadow: ShadowLimit) -> Self {
+        self.shadow = shadow;
+        self
+    }
+
     pub fn loopback(port: u16) -> Self {
         let client = Client::builder(TokioExecutor::new()).build_http();
         Self {
@@ -54,6 +69,8 @@ impl Upstream {
             client,
             dial_timeout: Duration::from_secs(10),
             seam: Arc::default(),
+            rpc: Arc::default(),
+            shadow: ShadowLimit::default(),
         }
     }
 }

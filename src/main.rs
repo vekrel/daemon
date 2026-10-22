@@ -7,6 +7,7 @@ use vekrel::{
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
+    rpc_seam::{self, UnaryHandler},
     server, supervisor,
 };
 
@@ -60,12 +61,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let mut seam = Seam::default();
+    // WS handlers (Tasks 5/6) go here; each tag's mode comes from `[rust.handlers]`.
+    let ws_handlers: Vec<Arc<dyn UnaryHandler>> = Vec::new();
+    let ws_handlers = ws_handlers
+        .into_iter()
+        .map(|h| {
+            let mode = cfg.rust.mode(h.tag());
+            (h, mode)
+        })
+        .collect();
+    let mut rpc = rpc_seam::Seam::new(ws_handlers);
     if let Some((userdata, files)) = &auth_files {
-        seam = Seam::new(HandlerCtx {
+        let ctx = HandlerCtx {
             cwd: std::env::current_dir()?,
             state_dir: userdata.clone(),
             engine_port,
-        });
+            ..HandlerCtx::default()
+        };
+        seam = Seam::new(ctx.clone());
+        rpc = rpc.with_ctx(ctx);
         let unsupported =
             auth_session::unsupported_engine(&cfg.engine.args, |k| std::env::var(k).ok());
         match (unsupported, userdata.to_str()) {
@@ -76,10 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             (None, Some(dir)) => {
                 // The supervisor pins the engine to VEKREL_HOST=127.0.0.1, so no machine id is needed.
                 let desc = auth_session::Descriptor::web("127.0.0.1", engine_port, dir, "");
-                let h: Arc<dyn RouteHandler> =
-                    Arc::new(auth_session::AuthSession::new(desc, files.clone()));
+                let auth = Arc::new(auth_session::AuthSession::new(desc, files.clone()));
+                let h: Arc<dyn RouteHandler> = auth.clone();
                 let mode = cfg.rust.mode(&http_seam::key(&*h));
                 seam = seam.with(mode, h);
+                // Without it (unsupported engine config) WS sessions are unverified: serve denies.
+                rpc = rpc.with_auth(auth);
             }
         }
         let cwd = seam.ctx.cwd.clone();
@@ -102,7 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.clone(),
         server::Upstream::loopback(engine_port)
             .with_public_port(cfg.server.port)
-            .with_seam(seam),
+            .with_seam(seam)
+            .with_rpc_seam(rpc),
         tap,
     );
     if let Some((_, files)) = auth_files {
