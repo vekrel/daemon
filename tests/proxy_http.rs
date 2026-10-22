@@ -243,7 +243,7 @@ async fn client_supplied_forwarded_host_is_overwritten() {
     let h = seen.lock().await;
     assert_eq!(h["x-forwarded-host"], base.trim_start_matches("http://"));
     assert_eq!(h["x-forwarded-proto"], "http");
-    assert_eq!(h["x-forwarded-for"], "10.0.0.9, 127.0.0.1");
+    assert_eq!(h["x-forwarded-for"], "127.0.0.1");
 }
 
 async fn forwarded_host_seen_with_client_host(host: impl Fn(&str) -> String) {

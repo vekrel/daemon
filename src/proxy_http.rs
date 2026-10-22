@@ -54,18 +54,14 @@ pub(crate) fn add_forwarded(
         Some(v) => h.insert("x-forwarded-host", v),
         None => h.remove("x-forwarded-host"),
     };
-    if let Some(ip) = ip {
-        let prior: Vec<_> = h
-            .get_all("x-forwarded-for")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect();
-        let v = [prior, vec![&ip.to_string()]].concat().join(", ");
-        h.insert(
+    // Replaced, never appended: a client-supplied first entry must not be trusted.
+    match ip {
+        Some(ip) => h.insert(
             "x-forwarded-for",
-            HeaderValue::from_str(&v).expect("ip list"),
-        );
-    }
+            HeaderValue::from_str(&ip.to_string()).expect("ip"),
+        ),
+        None => h.remove("x-forwarded-for"),
+    };
 }
 
 pub(crate) fn error(status: StatusCode, code: &str) -> Response {
