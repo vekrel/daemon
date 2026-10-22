@@ -2,6 +2,7 @@
 //! they are wired.
 pub mod auth_session;
 pub mod machine_descriptor;
+pub mod read_file;
 
 pub use auth_session::VerifiedSession;
 use std::path::PathBuf;

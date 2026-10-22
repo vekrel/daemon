@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
-    handlers::{HandlerCtx, auth_session, machine_descriptor},
+    handlers::{HandlerCtx, auth_session, machine_descriptor, read_file},
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(supervisor::State::default());
     let mut seam = Seam::default();
     // WS handlers (Tasks 5/6) go here; each tag's mode comes from `[rust.handlers]`.
-    let ws_handlers: Vec<Arc<dyn UnaryHandler>> = Vec::new();
+    let ws_handlers: Vec<Arc<dyn UnaryHandler>> = vec![Arc::new(read_file::ReadFile)];
     let ws_handlers = ws_handlers
         .into_iter()
         .map(|h| {

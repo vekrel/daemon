@@ -106,6 +106,7 @@ mod tests {
     fn handler_modes_default_to_shadow() {
         let c = parse("[server]\nport = 1\n[engine]\ncommand = \"x\"\n");
         assert_eq!(c.rust.mode("GET /api/auth/session"), Mode::Shadow);
+        assert_eq!(c.rust.mode("projects.readFile"), Mode::Shadow);
         let c = parse(
             "[server]\nport = 1\n[engine]\ncommand = \"x\"\n[rust.handlers]\n\"GET /api/auth/session\" = \"serve\"\n\"x\" = \"off\"\n",
         );

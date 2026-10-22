@@ -23,6 +23,7 @@ args = ["/abs/path/apps/server/dist/bin.mjs"]
 [rust.handlers]    # optional; every handler defaults to "shadow"
 "GET /api/auth/session" = "shadow"   # off | shadow | serve
 "GET /.well-known/vekrel/machine" = "shadow"
+"projects.readFile" = "shadow"
 ```
 
 Rust handlers: in `shadow` the engine answers, and the daemon compares its own answer (status, `content-type`, body bytes; bodies over 1 MiB are skipped) and logs `rust shadow` with `outcome="match"` or `outcome="mismatch"` plus the first differing JSON path (never values). In `serve` the daemon answers with `x-vekrel-served-by: rust` and the engine never sees the request. Requests a handler cannot answer exactly (legacy cookie, DPoP proof, unreadable key or DB, a missing `machine-id`) always go to the engine. The machine handler is disabled at startup unless the engine runs as `node <script>` from a plain checkout (no npm/npx/pnpm/bun install, no `VEKREL_NPM_LAUNCHER_PATH`), because Node adds install capabilities otherwise.

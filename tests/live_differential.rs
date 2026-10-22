@@ -63,6 +63,14 @@ fn curl(args: &[&str]) -> (u16, String) {
 /// Starts the daemon over the real engine with every handler in shadow mode and waits until the
 /// engine answers and has printed its pairing token. `None` when `VEKREL_LIVE_ENGINE` is unset.
 fn start(tag: &str) -> Option<(Daemon, String, PathBuf, String)> {
+    start_with(tag, |_, _| {})
+}
+
+/// `start`, letting `prep` lay out files in the temp home and adjust the daemon command.
+fn start_with(
+    tag: &str,
+    prep: impl FnOnce(&Path, &mut Command),
+) -> Option<(Daemon, String, PathBuf, String)> {
     let Ok(bin) = std::env::var("VEKREL_LIVE_ENGINE") else {
         eprintln!("VEKREL_LIVE_ENGINE unset; skipping");
         return None;
@@ -77,12 +85,15 @@ fn start(tag: &str) -> Option<(Daemon, String, PathBuf, String)> {
         format!(
             "[server]\nport = {public}\n[engine]\ncommand = \"node\"\nargs = [{bin:?}]\nport = {engine}\n\
              [rust.handlers]\n\"GET /api/auth/session\" = \"shadow\"\n\
-             \"GET /.well-known/vekrel/machine\" = \"shadow\"\n"
+             \"GET /.well-known/vekrel/machine\" = \"shadow\"\n\
+             \"projects.readFile\" = \"shadow\"\n"
         ),
     )
     .unwrap();
     let out = std::fs::File::create(home.join("serve.log")).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_vekrel"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vekrel"));
+    prep(&home, &mut cmd);
+    let child = cmd
         .args(["serve", "--config"])
         .arg(&cfg)
         .env("VEKREL_HOME", &home)
@@ -124,10 +135,10 @@ fn start(tag: &str) -> Option<(Daemon, String, PathBuf, String)> {
 fn shadow_counts(home: &Path, route: &str) -> (usize, usize) {
     std::thread::sleep(Duration::from_millis(300));
     let l = log(home);
-    let tag = format!("route=\"{route}\"");
+    let tags = [format!("route=\"{route}\""), format!("tag=\"{route}\"")];
     let shadow: Vec<&str> = l
         .lines()
-        .filter(|l| l.contains("rust shadow") && l.contains(&tag))
+        .filter(|l| l.contains("rust shadow") && tags.iter().any(|t| l.contains(t)))
         .collect();
     let mismatches = shadow.iter().filter(|l| !l.contains("\"match\"")).count();
     for s in shadow.iter().filter(|l| !l.contains("\"match\"")) {
@@ -285,6 +296,211 @@ fn auth_session_shadow_matches_node() {
     println!("shadow log: {matches} match, {mismatches} mismatch");
     assert_eq!(mismatches, 0);
     assert_eq!(matches, 9, "every request compared");
+    drop(d);
+    assert!(!home.exists());
+}
+
+/// Pairs with the printed token; returns the `cookie:` header value for the session.
+fn pair(base: &str, home: &Path, token: &str) -> String {
+    let jar = home.join("jar");
+    let (code, _) = curl(&[
+        "-c",
+        jar.to_str().unwrap(),
+        "-X",
+        "POST",
+        "-H",
+        "content-type: application/json",
+        "-d",
+        &format!(r#"{{"credential":"{token}"}}"#),
+        &format!("{base}/api/auth/browser-session"),
+    ]);
+    assert_eq!(code, 200, "pairing failed");
+    std::fs::read_to_string(&jar)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<_> = l.split('\t').collect();
+            (f.len() == 7 && f[5].starts_with("t3_session")).then(|| format!("{}={}", f[5], f[6]))
+        })
+        .next()
+        .expect("session cookie")
+}
+
+const CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn read_file_shadow_matches_node() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    // The engine runs in <home>/ws (its cwd) with HOME=<home>/fakehome.
+    let Some((d, base, home, token)) = start_with("readfile", |home, cmd| {
+        let w = |rel: &str, bytes: &[u8]| std::fs::write(home.join(rel), bytes).unwrap();
+        for dir in ["ws/sub", "out", "fakehome"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        w("ws/small.txt", b"hello\n");
+        w("out/secret.txt", b"top secret\n");
+        w("fakehome/x.txt", b"home file\n");
+        w("ws/nul.bin", b"a\0b");
+        w("ws/bom.txt", b"\xef\xbb\xbfhi");
+        w(
+            "ws/invalid.txt",
+            b"ok\xff\xfe\x80 \xc3\x28 \xe2\x82 \xf0\x9f\x98 end",
+        );
+        let mib = 1024 * 1024;
+        let mut big = vec![b'a'; mib - 1];
+        big.extend("é".as_bytes());
+        big.extend(vec![b'b'; mib]);
+        w("ws/big.txt", &big);
+        let mut big4 = vec![b'a'; mib - 2];
+        big4.extend("😀".as_bytes());
+        big4.extend(vec![b'z'; 100]);
+        w("ws/big4.txt", &big4);
+        w("ws/exact.txt", &vec![b'c'; mib]);
+        #[cfg(unix)]
+        for (to, at) in [
+            ("../out/secret.txt", "link"),
+            ("nowhere", "dangling"),
+            ("../out", "outdir"),
+        ] {
+            std::os::unix::fs::symlink(to, home.join("ws").join(at)).unwrap();
+        }
+        cmd.current_dir(home.join("ws"))
+            .env("HOME", home.join("fakehome"));
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let ws = home.join("ws").to_string_lossy().into_owned();
+    let out = home.join("out").to_string_lossy().into_owned();
+    let p = |rel: &str| json!({"cwd": ws, "relativePath": rel});
+    let allow = |rel: &str| json!({"cwd": ws, "relativePath": rel, "allowMissing": true});
+    let cases: Vec<(&str, Value)> = vec![
+        ("t3.json allowMissing", allow("t3.json")),
+        ("small", p("small.txt")),
+        (
+            "padded",
+            json!({"cwd": format!(" {ws} "), "relativePath": "  ./sub/../small.txt  "}),
+        ),
+        ("2 MiB, split 2-byte char", p("big.txt")),
+        ("split 4-byte char", p("big4.txt")),
+        ("exactly 1 MiB", p("exact.txt")),
+        ("bom", p("bom.txt")),
+        ("invalid utf-8", p("invalid.txt")),
+        ("nul byte", p("nul.bin")),
+        ("../outside", p("../out/secret.txt")),
+        (".", p(".")),
+        ("symlink escape", p("link")),
+        ("missing through escaping dir", allow("outdir/nope")),
+        ("absolute outside", p(&format!("{out}/secret.txt"))),
+        (
+            "absolute missing allowMissing",
+            allow(&format!("{out}/nope")),
+        ),
+        ("absolute missing", p(&format!("{out}/nope"))),
+        ("~/x", p("~/x.txt")),
+        ("missing", p("t3.json")),
+        ("deep missing allowMissing", allow("a/b/c.txt")),
+        ("dangling allowMissing", allow("dangling")),
+        ("ENOTDIR allowMissing", allow("small.txt/x")),
+        ("directory", p("sub")),
+        (
+            "cwd missing",
+            json!({"cwd": format!("{ws}-nope"), "relativePath": "x.txt"}),
+        ),
+        (
+            "cwd relative",
+            json!({"cwd": ".", "relativePath": "small.txt"}),
+        ),
+        ("network path", p("//host/x")),
+    ];
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let exits = rt.block_on(async {
+        let mut req = format!("ws://127.0.0.1:{port}/ws?orchestrationProtocol=2")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert("cookie", cookie.parse().unwrap());
+        let (mut c, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+        for (i, (_, payload)) in cases.iter().enumerate() {
+            let m = json!({"_tag":"Request","id":1000 + i,"tag":"projects.readFile","payload":payload,"headers":[]});
+            c.send(Message::text(m.to_string())).await.unwrap();
+        }
+        let mut exits = std::collections::BTreeMap::new();
+        while exits.len() < cases.len() {
+            let msg = tokio::time::timeout(Duration::from_secs(20), c.next()).await;
+            let Ok(Some(Ok(Message::Text(t)))) = msg else {
+                panic!("no frame: {msg:?}")
+            };
+            let v: Value = serde_json::from_str(t.as_str()).unwrap();
+            for m in v.as_array().cloned().unwrap_or(vec![v]) {
+                if m["_tag"] == "Exit" && m["requestId"].as_u64().is_some_and(|i| i >= 1000) {
+                    exits.insert(m["requestId"].as_u64().unwrap() - 1000, m["exit"].clone());
+                }
+            }
+        }
+        exits
+    });
+    for (i, (what, _)) in cases.iter().enumerate() {
+        let e = &exits[&(i as u64)];
+        let outcome = match e["_tag"].as_str() {
+            Some("Success") => "Success".to_owned(),
+            _ => format!("Failure {}", e["cause"][0]["error"]["failure"]),
+        };
+        println!("{what}: {outcome}");
+    }
+    assert_eq!(exits[&0]["value"]["exists"], false);
+    let (matches, mismatches) = shadow_counts(&home, "projects.readFile");
+    println!("raw client: {matches} match, {mismatches} mismatch");
+    assert_eq!(mismatches, 0);
+    assert_eq!(matches, cases.len(), "every request compared");
+
+    // A browser boot asks for `t3.json` on its own; pair it with a second token.
+    if !Path::new(CHROME).exists() {
+        println!("Chrome missing; skipped the browser boot");
+    } else {
+        let (code, body) = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            &format!("cookie: {cookie}"),
+            "-H",
+            "content-type: application/json",
+            "-d",
+            "{}",
+            &format!("{base}/api/auth/pairing-token"),
+        ]);
+        assert_eq!(code, 200, "{body}");
+        let cred: Value = serde_json::from_str(&body).unwrap();
+        let cred = cred["credential"].as_str().unwrap();
+        let profile = home.join("chrome");
+        let mut chrome = Command::new(CHROME)
+            .args(["--headless=new", "--disable-gpu", "--no-first-run"])
+            .arg(format!("--user-data-dir={}", profile.display()))
+            .arg("--remote-debugging-port=0")
+            .arg(format!("{base}/pair#token={cred}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while shadow_counts(&home, "projects.readFile").0
+            + shadow_counts(&home, "projects.readFile").1
+            <= cases.len()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let _ = chrome.kill();
+        let _ = chrome.wait();
+        let (m, mm) = shadow_counts(&home, "projects.readFile");
+        println!("after browser boot: {m} match, {mm} mismatch");
+        assert_eq!(mm, 0);
+        assert!(m > cases.len(), "the browser boot sent projects.readFile");
+    }
     drop(d);
     assert!(!home.exists());
 }
