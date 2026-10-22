@@ -16,7 +16,7 @@ const HOP_BY_HOP: [&str; 6] = [
     "trailer",
 ];
 
-fn strip_hop_by_hop(h: &mut HeaderMap) {
+pub(crate) fn strip_hop_by_hop(h: &mut HeaderMap) {
     for name in HOP_BY_HOP {
         h.remove(name);
     }
@@ -30,7 +30,7 @@ fn strip_hop_by_hop(h: &mut HeaderMap) {
     }
 }
 
-fn error(status: StatusCode, code: &str) -> Response {
+pub(crate) fn error(status: StatusCode, code: &str) -> Response {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")

@@ -5,7 +5,9 @@ struct Guard(Child);
 impl Drop for Guard {
     fn drop(&mut self) {
         // SIGTERM so vekrel reaps its engine child; SIGKILL would orphan it.
-        let _ = Command::new("kill").args(["-TERM", &self.0.id().to_string()]).status();
+        let _ = Command::new("kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .status();
         std::thread::sleep(Duration::from_millis(200));
         let _ = self.0.kill();
         let _ = self.0.wait();
@@ -13,12 +15,20 @@ impl Drop for Guard {
 }
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn start(name: &str, command: &str, args: &[&str]) -> (Guard, u16) {
     let health = free_port(); // the public server port
-    let args_toml = args.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(", ");
+    let args_toml = args
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let cfg = format!(
         "[server]\nport = {health}\n[engine]\ncommand = {command:?}\nargs = [{args_toml}]\n"
     );
@@ -34,19 +44,29 @@ fn start(name: &str, command: &str, args: &[&str]) -> (Guard, u16) {
 
 async fn health(port: u16) -> Option<(String, u64)> {
     let v: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/healthz"))
-        .await.ok()?.json().await.ok()?;
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
     Some((v["engine"].as_str()?.to_string(), v["restarts"].as_u64()?))
 }
 
 /// Polls until `done` or timeout; returns every observation.
-async fn poll(port: u16, total: Duration, mut done: impl FnMut(&(String, u64)) -> bool) -> Vec<(String, u64)> {
+async fn poll(
+    port: u16,
+    total: Duration,
+    mut done: impl FnMut(&(String, u64)) -> bool,
+) -> Vec<(String, u64)> {
     let end = tokio::time::Instant::now() + total;
     let mut seen = vec![];
     while tokio::time::Instant::now() < end {
         if let Some(h) = health(port).await {
             let d = done(&h);
             seen.push(h);
-            if d { break; }
+            if d {
+                break;
+            }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -92,9 +112,19 @@ async fn sigterm_stops_engine_child() {
     let seen = poll(port, Duration::from_secs(2), |h| h.0 == "up").await;
     assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
     let pattern = format!("sleep {marker}");
-    let found = || Command::new("pgrep").args(["-f", &pattern]).output().unwrap().status.success();
+    let found = || {
+        Command::new("pgrep")
+            .args(["-f", &pattern])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
     assert!(found(), "engine child not running");
-    Command::new("kill").args(["-TERM", &g.0.id().to_string()]).status().unwrap();
+    Command::new("kill")
+        .args(["-TERM", &g.0.id().to_string()])
+        .status()
+        .unwrap();
     let end = tokio::time::Instant::now() + Duration::from_secs(3);
     while g.0.try_wait().unwrap().is_none() {
         assert!(tokio::time::Instant::now() < end, "vekrel did not exit");
@@ -118,7 +148,10 @@ async fn child_receives_vekrel_port_env() {
     let (_g, port) = start("env", "sh", &["-c", &script]);
     poll(port, Duration::from_secs(2), |h| h.0 == "up").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(std::fs::read_to_string(a).unwrap().trim(), (port + 10).to_string());
+    assert_eq!(
+        std::fs::read_to_string(a).unwrap().trim(),
+        (port + 10).to_string()
+    );
     assert_eq!(std::fs::read_to_string(b).unwrap().trim(), "127.0.0.1 1");
     let _ = std::fs::remove_dir_all(dir);
 }

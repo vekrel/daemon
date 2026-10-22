@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::process::Command;
+use tokio::{process::Command, sync::watch};
 
 #[derive(Default)]
 pub struct State {
@@ -12,6 +12,15 @@ pub struct State {
     pub restarts: AtomicU32,
     /// Bumped on every (re)spawn; proxied sockets compare it to detect a restart.
     pub generation: AtomicU64,
+    /// Same value as `generation`, for tasks that await a restart.
+    pub generation_tx: watch::Sender<u64>,
+}
+
+impl State {
+    pub fn bump_generation(&self) {
+        let g = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.generation_tx.send_replace(g);
+    }
 }
 
 /// 1s doubling, capped at 30s.
@@ -24,7 +33,7 @@ pub async fn run(cfg: EngineConfig, port: u16, state: Arc<State>) {
     let mut attempt: u32 = 0;
     loop {
         let started = Instant::now();
-        state.generation.fetch_add(1, Ordering::SeqCst);
+        state.bump_generation();
         let spawned = Command::new(&cfg.command)
             .args(&cfg.args)
             .env("VEKREL_PORT", port.to_string())

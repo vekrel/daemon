@@ -1,4 +1,8 @@
-use crate::{proxy_http, supervisor::State};
+use crate::{
+    proxy_http,
+    proxy_ws::{self, FrameTap, NoTap},
+    supervisor::State,
+};
 use axum::{Json, Router, body::Body, extract::State as AxState, routing::get};
 use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
@@ -27,9 +31,21 @@ impl Upstream {
 }
 
 pub fn build(state: Arc<State>, upstream: Upstream) -> Router {
+    build_with_tap(state, upstream, Arc::new(NoTap))
+}
+
+pub fn build_with_tap(state: Arc<State>, upstream: Upstream, tap: Arc<dyn FrameTap>) -> Router {
+    let ws = proxy_ws::Ctx {
+        upstream: upstream.clone(),
+        state: state.clone(),
+        tap,
+    };
     Router::new()
         .route("/healthz", get(healthz))
         .with_state(state)
+        // Must precede the fallback, which strips `upgrade`.
+        .route("/ws", get(proxy_ws::handler))
+        .with_state(ws)
         .fallback(proxy_http::handler)
         .with_state(upstream)
 }
