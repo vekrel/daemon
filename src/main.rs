@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Cmd::Serve { config, record } = Cli::parse().cmd;
     let mut cfg = config::load(&config)?;
     cfg.engine.record |= record;
-    let engine_port = cfg.engine_port();
+    let engine_port = cfg.engine_port()?;
     let recorder = match cfg.engine.record {
         true => Some(Arc::new(Recorder::create(
             &state_dir()?.join("recordings"),

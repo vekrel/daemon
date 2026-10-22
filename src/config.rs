@@ -24,8 +24,13 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn engine_port(&self) -> u16 {
-        self.engine.port.unwrap_or(self.server.port + 10)
+    pub fn engine_port(&self) -> Result<u16, ConfigError> {
+        match self.engine.port {
+            Some(p) => Ok(p),
+            None => self.server.port.checked_add(10).ok_or(ConfigError::Invalid(
+                "server.port too high to derive engine.port; set engine.port explicitly",
+            )),
+        }
     }
 }
 
@@ -33,6 +38,7 @@ impl Config {
 pub enum ConfigError {
     Io(std::io::Error),
     Parse(toml::de::Error),
+    Invalid(&'static str),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -40,6 +46,7 @@ impl std::fmt::Display for ConfigError {
         match self {
             Self::Io(e) => write!(f, "cannot read config: {e}"),
             Self::Parse(e) => write!(f, "invalid config: {e}"),
+            Self::Invalid(m) => write!(f, "invalid config: {m}"),
         }
     }
 }
@@ -62,8 +69,19 @@ mod tests {
     #[test]
     fn engine_port_defaults_to_server_port_plus_ten() {
         let c = parse("[server]\nport = 3779\n[engine]\ncommand = \"x\"\n");
-        assert_eq!(c.engine_port(), 3789);
+        assert_eq!(c.engine_port().unwrap(), 3789);
         let c = parse("[server]\nport = 3779\n[engine]\ncommand = \"x\"\nport = 5000\n");
-        assert_eq!(c.engine_port(), 5000);
+        assert_eq!(c.engine_port().unwrap(), 5000);
+    }
+
+    #[test]
+    fn engine_port_overflow_is_a_config_error() {
+        let c = parse("[server]\nport = 65530\n[engine]\ncommand = \"x\"\n");
+        assert_eq!(
+            c.engine_port().unwrap_err().to_string(),
+            "invalid config: server.port too high to derive engine.port; set engine.port explicitly"
+        );
+        let c = parse("[server]\nport = 65530\n[engine]\ncommand = \"x\"\nport = 5000\n");
+        assert_eq!(c.engine_port().unwrap(), 5000);
     }
 }
