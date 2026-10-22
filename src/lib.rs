@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod config;
 pub mod proxy_http;
 pub mod proxy_ws;

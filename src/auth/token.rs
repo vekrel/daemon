@@ -1,0 +1,127 @@
+//! The engine's session token: `base64url(claimsJSON) "." base64url(HMAC-SHA256(key, base64url(claimsJSON)))`.
+//! Mirrors `Vekrel-Engine/apps/server/src/auth/SessionStore.ts` (`SessionClaims`, `verify`) and `auth/utils.ts`.
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+
+/// `SessionClaims` from `SessionStore.ts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Payload {
+    pub v: u8,
+    pub kind: String,
+    pub sid: String,
+    pub sub: String,
+    pub scopes: Vec<String>,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtc: Option<String>,
+    /// Epoch milliseconds.
+    pub iat: i64,
+    /// Epoch milliseconds.
+    pub exp: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TokenError {
+    Malformed,
+    BadSignature,
+}
+
+/// Signature and claims shape only; expiry and revocation are the caller's (as in `SessionStore.verify`).
+pub fn verify(token: &str, key: &[u8; 32]) -> Result<Payload, TokenError> {
+    // Node does `token.split(".")` and uses the first two parts, so extra dots are ignored.
+    let mut parts = token.split('.');
+    let (enc, sig) = match (parts.next(), parts.next()) {
+        (Some(e), Some(s)) if !e.is_empty() && !s.is_empty() => (e, s),
+        _ => return Err(TokenError::Malformed),
+    };
+    let sig = B64
+        .decode(sig.trim_end_matches('='))
+        .map_err(|_| TokenError::BadSignature)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key length");
+    mac.update(enc.as_bytes());
+    mac.verify_slice(&sig)
+        .map_err(|_| TokenError::BadSignature)?;
+    let json = B64
+        .decode(enc.trim_end_matches('='))
+        .map_err(|_| TokenError::Malformed)?;
+    let p: Payload = serde_json::from_slice(&json).map_err(|_| TokenError::Malformed)?;
+    if p.kind != "session" || !matches!(p.v, 1 | 2) {
+        return Err(TokenError::Malformed);
+    }
+    Ok(p)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// Reproduces `SessionStore.issue`: sign the base64url payload string, not the JSON.
+    pub(crate) fn mint(p: &Payload, key: &[u8; 32]) -> String {
+        let enc = B64.encode(serde_json::to_vec(p).unwrap());
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        mac.update(enc.as_bytes());
+        format!("{enc}.{}", B64.encode(mac.finalize().into_bytes()))
+    }
+
+    pub(crate) fn payload() -> Payload {
+        Payload {
+            v: 1,
+            kind: "session".into(),
+            sid: "6f1c0d3e-0000-4000-8000-000000000001".into(),
+            sub: "browser".into(),
+            scopes: vec!["orchestration:read".into()],
+            method: "browser-session-cookie".into(),
+            jkt: None,
+            rtc: None,
+            iat: 1,
+            exp: i64::MAX,
+        }
+    }
+
+    const K: [u8; 32] = [7; 32];
+
+    #[test]
+    fn round_trips_a_minted_token() {
+        assert_eq!(verify(&mint(&payload(), &K), &K), Ok(payload()));
+    }
+
+    #[test]
+    fn wrong_key_is_bad_signature() {
+        assert_eq!(
+            verify(&mint(&payload(), &K), &[8; 32]),
+            Err(TokenError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn tampered_payload_is_bad_signature() {
+        let t = mint(&payload(), &K);
+        let (_, sig) = t.split_once('.').unwrap();
+        let mut p = payload();
+        p.scopes.push("admin".into());
+        let forged = B64.encode(serde_json::to_vec(&p).unwrap());
+        assert_eq!(
+            verify(&format!("{forged}.{sig}"), &K),
+            Err(TokenError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn missing_dot_is_malformed() {
+        assert_eq!(verify("abc", &K), Err(TokenError::Malformed));
+        assert_eq!(verify(".abc", &K), Err(TokenError::Malformed));
+    }
+
+    #[test]
+    fn signed_garbage_payload_is_malformed() {
+        let enc = B64.encode(b"not json");
+        let mut mac = Hmac::<Sha256>::new_from_slice(&K).unwrap();
+        mac.update(enc.as_bytes());
+        let t = format!("{enc}.{}", B64.encode(mac.finalize().into_bytes()));
+        assert_eq!(verify(&t, &K), Err(TokenError::Malformed));
+    }
+}

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 use vekrel::{
-    config,
+    auth, config,
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
     server, supervisor,
@@ -39,9 +39,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(supervisor::State::default());
     tokio::spawn(supervisor::run(cfg.engine, engine_port, state.clone()));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.server.port)).await?;
+    let mut app = server::build_with_tap(
+        state,
+        server::Upstream::loopback(engine_port).with_public_port(cfg.server.port),
+        tap,
+    );
+    match state_dir() {
+        // Same layout as the engine's config.ts: <base>/userdata/{statev2.sqlite,secrets/}.
+        Ok(base) => {
+            let userdata = base.join("userdata");
+            app = auth::shadow::apply(
+                app,
+                userdata.join("secrets/server-signing-key.bin"),
+                userdata.join("statev2.sqlite"),
+            );
+        }
+        Err(e) => tracing::warn!("shadow auth disabled: {e}"),
+    }
     // Returning drops the runtime, which drops the supervisor's child (kill_on_drop).
     tokio::select! {
-        r = axum::serve(listener, server::build_with_tap(state, server::Upstream::loopback(engine_port).with_public_port(cfg.server.port), tap).into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
+        r = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
         _ = shutdown_signal() => tracing::info!("shutting down"),
     }
     Ok(())

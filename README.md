@@ -34,3 +34,7 @@ scripts/smoke.sh ../Vekrel-Engine ../Vekrel-Web   # or ENGINE_DIR=... WEB_DIR=..
 The script copies `Vekrel-Web/apps/web/dist` into the engine, starts `vekrel serve --record` with a temporary `VEKREL_HOME`, checks `/healthz` and `/.well-known/vekrel/machine` through the public port, then stops the daemon and deletes the temporary state.
 
 For a browser session, run `vekrel serve` yourself with a config like the one in the script. The engine logs a pairing URL with its own loopback port (`public + 10`). Replace that port with the public port before you open it so the browser goes through the proxy. With `--record`, frames are written to `$VEKREL_HOME/recordings/`. Those files contain session tokens, so never commit them.
+
+## Shadow auth
+
+Every request, including the `/ws` upgrade, goes through an observe-only check of the engine's session credential: any `t3_session*` cookie or an `Authorization: Bearer|DPoP` token. The daemon verifies the HMAC with `<VEKREL_HOME>/userdata/secrets/server-signing-key.bin`, then checks expiry and the `auth_sessions` row in `<VEKREL_HOME>/userdata/statev2.sqlite`, opened read-only. The DPoP proof itself is not checked. The outcome goes into a request extension, and anything other than `Verified` or `NoCredential` is logged as a `shadow auth` warning with the path (never the token). It never blocks or changes a request; the engine still decides.
