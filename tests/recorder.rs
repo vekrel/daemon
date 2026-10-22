@@ -125,3 +125,24 @@ async fn records_every_text_frame_verbatim() {
     let ts: Vec<u64> = rows.iter().map(|r| r["t"].as_u64().unwrap()).collect();
     assert!(ts.windows(2).all(|w| w[0] <= w[1]), "{ts:?}");
 }
+
+#[test]
+fn close_writes_every_queued_frame_then_stops() {
+    use vekrel::proxy_ws::{Dir, FrameTap};
+    let dir =
+        TempDir(std::env::temp_dir().join(format!("vekrel-rec-close-{}", std::process::id())));
+    let rec = Recorder::create(&dir.0).unwrap();
+    for i in 0..1000 {
+        rec.on_frame(Dir::C2s, &Message::text(format!("f{i}")));
+    }
+    rec.close(Duration::from_secs(1));
+    rec.on_frame(Dir::C2s, &Message::text("late"));
+    let text = std::fs::read_to_string(rec.path()).unwrap();
+    assert_eq!(text.lines().count(), 1000);
+    assert!(
+        text.ends_with("\"frame\":\"f999\"}\n"),
+        "{}",
+        &text[text.len() - 60..]
+    );
+    assert_eq!(rec.dropped(), 1);
+}

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use vekrel::{
     auth, config,
     proxy_ws::{FrameTap, NoTap},
@@ -31,16 +31,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = config::load(&config)?;
     cfg.engine.record |= record;
     let engine_port = cfg.engine_port();
-    let tap: Arc<dyn FrameTap> = if cfg.engine.record {
-        Arc::new(Recorder::create(&state_dir()?.join("recordings"))?)
-    } else {
-        Arc::new(NoTap)
+    let recorder = match cfg.engine.record {
+        true => Some(Arc::new(Recorder::create(
+            &state_dir()?.join("recordings"),
+        )?)),
+        false => None,
+    };
+    let tap: Arc<dyn FrameTap> = match &recorder {
+        Some(r) => r.clone(),
+        None => Arc::new(NoTap),
     };
     let state = Arc::new(supervisor::State::default());
-    tokio::spawn(supervisor::run(cfg.engine, engine_port, state.clone()));
+    let engine = tokio::spawn(supervisor::run(cfg.engine, engine_port, state.clone()));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.server.port)).await?;
     let mut app = server::build_with_tap(
-        state,
+        state.clone(),
         server::Upstream::loopback(engine_port).with_public_port(cfg.server.port),
         tap,
     );
@@ -56,10 +61,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => tracing::warn!("shadow auth disabled: {e}"),
     }
-    // Returning drops the runtime, which drops the supervisor's child (kill_on_drop).
     tokio::select! {
         r = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
         _ = shutdown_signal() => tracing::info!("shutting down"),
+    }
+    // Sockets get 1001; the supervisor SIGTERMs the engine and SIGKILLs it after its grace.
+    state.shutdown();
+    // Backstop only: if this times out, dropping the runtime drops the child (kill_on_drop).
+    let _ = tokio::time::timeout(supervisor::GRACE + Duration::from_secs(1), engine).await;
+    if let Some(r) = recorder {
+        tokio::task::spawn_blocking(move || r.close(Duration::from_secs(1))).await?;
     }
     Ok(())
 }

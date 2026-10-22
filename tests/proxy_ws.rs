@@ -283,3 +283,13 @@ async fn ws_forwarded_host_omitted_for_non_loopback_host() {
     event(&mut r.ev).await; // cookie
     assert_eq!(event(&mut r.ev).await, "fwd:|http|127.0.0.1");
 }
+
+#[tokio::test]
+async fn ws_clients_get_1001_on_shutdown() {
+    let r = rig().await;
+    let mut c = connect(r.proxy, "", None).await;
+    c.send(Message::text("x")).await.unwrap();
+    assert_eq!(recv(&mut c).await, Some(Message::text("echo:x")));
+    r.state.shutdown();
+    assert_eq!(close_of(recv(&mut c).await), (1001, "going away".into()));
+}

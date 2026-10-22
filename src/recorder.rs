@@ -7,11 +7,12 @@ use std::{
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
+        Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -20,10 +21,14 @@ const QUEUE: usize = 4096;
 
 pub struct Recorder {
     path: PathBuf,
-    tx: SyncSender<(u64, Dir, String)>,
+    tx: SyncSender<Item>,
+    writer: Mutex<Option<thread::JoinHandle<()>>>,
     dropped: AtomicU64,
     skipped: AtomicU64,
 }
+
+/// A frame to write, or `None`: flush and stop.
+type Item = Option<(u64, Dir, String)>;
 
 #[derive(Serialize)]
 struct Line<'a> {
@@ -55,13 +60,14 @@ impl Recorder {
         std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
         let file = opts.open(&path)?;
         let (tx, rx) = sync_channel(QUEUE);
-        thread::Builder::new()
+        let writer = thread::Builder::new()
             .name("vekrel-recorder".into())
             .spawn(move || write_loop(rx, BufWriter::new(file)))?;
         tracing::info!("recording ws frames to {}", path.display());
         Ok(Self {
             path,
             tx,
+            writer: Mutex::new(Some(writer)),
             dropped: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
         })
@@ -74,6 +80,30 @@ impl Recorder {
     /// Frames lost because the writer fell `QUEUE` frames behind.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Writes out what is queued and stops the writer, waiting at most `limit`.
+    /// Frames tapped afterwards are counted as dropped.
+    pub fn close(&self, limit: Duration) {
+        let end = Instant::now() + limit;
+        // The stop marker queues behind pending frames; retry while the queue is full.
+        while let Err(TrySendError::Full(_)) = self.tx.try_send(None) {
+            if Instant::now() >= end {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let Some(w) = self.writer.lock().unwrap().take() else {
+            return;
+        };
+        while !w.is_finished() && Instant::now() < end {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if w.is_finished() {
+            let _ = w.join();
+        } else {
+            tracing::warn!("recorder did not flush within {limit:?}");
+        }
     }
 
     /// Non-text frames (binary, ping, pong, close) seen and not recorded.
@@ -89,7 +119,10 @@ impl FrameTap for Recorder {
             self.skipped.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        match self.tx.try_send((now_ms(), dir, text.as_str().to_owned())) {
+        match self
+            .tx
+            .try_send(Some((now_ms(), dir, text.as_str().to_owned())))
+        {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
@@ -104,7 +137,7 @@ impl FrameTap for Recorder {
     }
 }
 
-fn write_loop(rx: Receiver<(u64, Dir, String)>, mut out: BufWriter<File>) {
+fn write_loop(rx: Receiver<Item>, mut out: BufWriter<File>) {
     let write = |out: &mut BufWriter<File>, (t, dir, frame): (u64, Dir, String)| {
         let dir = match dir {
             Dir::C2s => "c2s",
@@ -120,13 +153,24 @@ fn write_loop(rx: Receiver<(u64, Dir, String)>, mut out: BufWriter<File>) {
         )?;
         out.write_all(b"\n")
     };
-    while let Ok(item) = rx.recv() {
+    while let Ok(Some(item)) = rx.recv() {
         // Drain what is queued, then flush once, so the file is current whenever the queue is idle.
+        let mut stop = false;
         let res = write(&mut out, item)
-            .and_then(|()| rx.try_iter().try_for_each(|i| write(&mut out, i)))
+            .and_then(|()| {
+                rx.try_iter()
+                    .map_while(|i| {
+                        stop = i.is_none();
+                        i
+                    })
+                    .try_for_each(|i| write(&mut out, i))
+            })
             .and_then(|()| out.flush());
         if let Err(e) = res {
             tracing::error!("recorder write failed, recording stopped: {e}");
+            return;
+        }
+        if stop {
             return;
         }
     }

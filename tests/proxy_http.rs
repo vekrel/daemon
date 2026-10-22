@@ -269,3 +269,25 @@ async fn forwarded_host_omitted_for_non_loopback_host() {
 async fn forwarded_host_omitted_for_wrong_port() {
     forwarded_host_seen_with_client_host(|_| "127.0.0.1:1".into()).await;
 }
+
+#[tokio::test]
+async fn asterisk_form_request_gets_400() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let base = proxy(1).await; // upstream never reached
+    let mut s = tokio::net::TcpStream::connect(base.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    s.write_all(b"OPTIONS * HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = String::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_string(&mut out))
+        .await
+        .expect("response in time")
+        .unwrap();
+    assert!(out.starts_with("HTTP/1.1 400"), "{out:?}");
+    assert!(
+        out.ends_with(r#"{"error":"bad_request_target"}"#),
+        "{out:?}"
+    );
+}

@@ -2122,6 +2122,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "hyper-util",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",

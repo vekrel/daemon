@@ -12,7 +12,7 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri, header},
     response::Response,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::watch;
 use tokio_tungstenite::{
@@ -62,6 +62,7 @@ pub async fn handler(
 ) -> Response {
     // Subscribed before dialing: a restart during the handshake still closes the socket.
     let generation = ctx.state.generation_tx.subscribe();
+    let shutdown = ctx.state.shutdown_tx.subscribe();
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
     let url = format!("ws://{}:{}/ws{query}", ctx.upstream.host, ctx.upstream.port);
     let mut req = url.into_client_request().expect("valid upstream ws url");
@@ -93,13 +94,14 @@ pub async fn handler(
         Some(p) => ws.protocols(p.to_str().ok().map(str::to_owned)),
         None => ws,
     };
-    ws.on_upgrade(move |client| pump(client, up, generation, ctx.tap))
+    ws.on_upgrade(move |client| pump(client, up, generation, shutdown, ctx.tap))
 }
 
 async fn pump<U>(
     mut client: WebSocket,
     mut up: U,
     mut generation: watch::Receiver<u64>,
+    mut shutdown: watch::Receiver<bool>,
     tap: Arc<dyn FrameTap>,
 ) where
     U: StreamExt<Item = Result<Message, WsError>> + SinkExt<Message, Error = WsError> + Unpin,
@@ -122,6 +124,11 @@ async fn pump<U>(
             }
             _ = generation.changed() => {
                 let f = AxClose { code: 1012, reason: "engine restarted".into() };
+                let _ = client.send(AxMsg::Close(Some(f))).await;
+                break;
+            }
+            _ = shutdown.wait_for(|&s| s).map(drop) => {
+                let f = AxClose { code: 1001, reason: "going away".into() };
                 let _ = client.send(AxMsg::Close(Some(f))).await;
                 break;
             }

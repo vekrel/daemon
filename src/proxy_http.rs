@@ -80,6 +80,10 @@ pub(crate) fn error(status: StatusCode, code: &str) -> Response {
 pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -> Response<Body> {
     let authority = format!("{}:{}", upstream.host, upstream.port);
     let path = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    // `OPTIONS *` has no leading slash; spliced in, it corrupts the authority (port 80).
+    if !path.starts_with('/') {
+        return error(StatusCode::BAD_REQUEST, "bad_request_target");
+    }
     *req.uri_mut() = format!("http://{authority}{path}")
         .parse()
         .expect("valid upstream uri");
