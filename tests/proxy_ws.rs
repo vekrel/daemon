@@ -325,3 +325,23 @@ async fn ws_dial_timeout_returns_504_json() {
     );
     assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
 }
+
+#[tokio::test]
+async fn upstream_dropping_tcp_closes_client_with_1011() {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+        let _ = ws.next().await; // one frame in, then vanish without a close frame
+        drop(ws);
+    });
+    let upstream = server::Upstream::loopback(up);
+    let (proxy, _g) = serve(server::build(Arc::new(State::default()), upstream)).await;
+    let mut c = connect(proxy, "", None).await;
+    c.send(Message::text("x")).await.unwrap();
+    assert_eq!(
+        close_of(recv(&mut c).await),
+        (1011, "engine connection lost".into())
+    );
+}

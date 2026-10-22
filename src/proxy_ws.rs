@@ -119,7 +119,12 @@ async fn pump<U>(
                 if up.send(m).await.is_err() || close { break }
             }
             m = up.next() => {
-                let Some(Ok(m)) = m else { break };
+                let Some(Ok(m)) = m else {
+                    // Ended or errored without a close frame.
+                    let f = AxClose { code: 1011, reason: "engine connection lost".into() };
+                    let _ = client.send(AxMsg::Close(Some(f))).await;
+                    break;
+                };
                 tap.on_frame(Dir::S2c, &m);
                 let close = m.is_close();
                 if client.send(to_axum(m)).await.is_err() || close { break }
