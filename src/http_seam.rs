@@ -103,7 +103,7 @@ pub fn key(h: &dyn RouteHandler) -> String {
     format!("{m} {p}")
 }
 
-/// Node bodies above this are passed through without comparison.
+/// Node bodies above this are passed through without comparison (`Compare::tee_limit`'s default).
 pub const TEE_LIMIT: u64 = 1 << 20;
 
 /// Request bodies above this are Node's.
@@ -246,6 +246,11 @@ pub struct Compare {
     /// mismatch; when nothing else differs its field is `ENRICHMENT`, and otherwise the first
     /// other differing path is reported, so enrichment never hides another difference.
     pub enrich: &'static [&'static str],
+    /// Top-level keys holding the read's sequence: Node and Rust read at different moments, so
+    /// a differing value is `SEQUENCE_SKEW` (a write landed between the reads), not a mismatch.
+    pub skew: &'static [&'static str],
+    /// Node bodies (decoded) above this are passed through without comparison.
+    pub tee_limit: u64,
 }
 
 impl Compare {
@@ -254,6 +259,8 @@ impl Compare {
         times: &[],
         headers: &["content-type"],
         enrich: &[],
+        skew: &[],
+        tee_limit: TEE_LIMIT,
     };
     /// The headers auth routes must match: Node's credential and challenge headers.
     pub const AUTH_HEADERS: &'static [&'static str] = &[
@@ -266,6 +273,9 @@ impl Compare {
 }
 
 const SKEW_MS: i64 = 2000;
+
+/// `diff`'s field when a `Compare::skew` key differs: the two reads saw different sequences.
+pub const SEQUENCE_SKEW: &str = "sequence_skew";
 
 /// `diff`'s field for a mismatch only at `Compare::enrich` paths (Node set, Rust `null`).
 pub const ENRICHMENT: &str = "enrichment";
@@ -309,6 +319,9 @@ pub fn diff_body(cmp: &Compare, body: &[u8], rust: &[u8]) -> Option<(&'static st
     let canonical = |v: &Value, raw: &[u8]| serde_json::to_vec(v).is_ok_and(|c| c == raw);
     if !canonical(&a, body) || !canonical(&b, rust) {
         return Some(("body", "$ (formatting)".into()));
+    }
+    if let Some(k) = cmp.skew.iter().find(|k| a.get(**k) != b.get(**k)) {
+        return Some((SEQUENCE_SKEW, format!("$.{k}")));
     }
     let raw = (!cmp.enrich.is_empty()).then(|| (a.clone(), b.clone()));
     let mut warm = false;
@@ -489,8 +502,9 @@ pub(crate) fn tee(
 ) -> Response<Body> {
     let (parts, body) = node.into_parts();
     // shortcut: a body without a known length (chunked) is skipped too; Node sends lengths for JSON.
-    if body.size_hint().upper().is_none_or(|n| n > TEE_LIMIT) {
-        tracing::info!(route, outcome = "skipped_large", "rust shadow");
+    if body.size_hint().upper().is_none_or(|n| n > cmp.tee_limit) {
+        let (status, len) = (parts.status.as_u16(), body.size_hint().upper());
+        tracing::info!(route, status, len, outcome = "skipped_large", "rust shadow");
         return Response::from_parts(parts, body);
     }
     let (tx, rx) = oneshot::channel();
@@ -502,11 +516,16 @@ pub(crate) fn tee(
         };
         // Node compresses bodies of 1 KiB and up when the client accepts it; compare the JSON.
         let enc = headers.get(header::CONTENT_ENCODING);
-        let Some(bytes) = decoded(enc, bytes) else {
+        let Some(bytes) = decoded_up_to(enc, bytes, cmp.tee_limit) else {
             tracing::info!(route, outcome = "skipped_encoding", "rust shadow");
             return;
         };
-        let d = diff(&cmp, status, &headers, &bytes, &rust);
+        // A multi-MB body (the shell) takes tens of ms to compare: off the async workers.
+        let (h, b) = (headers.clone(), bytes.clone());
+        let blocking = move || (diff(&cmp, status, &h, &b, &rust), rust);
+        let Ok((d, rust)) = tokio::task::spawn_blocking(blocking).await else {
+            return;
+        };
         if let Some(DryRun(check)) = rust.extensions().get::<DryRun>().cloned()
             && status == rust.status()
         {
@@ -521,6 +540,9 @@ pub(crate) fn tee(
         }
         match d {
             None => tracing::info!(route, outcome = "match", "rust shadow"),
+            Some((SEQUENCE_SKEW, path)) => {
+                tracing::info!(route, outcome = SEQUENCE_SKEW, path, "rust shadow")
+            }
             // Expected while Node sits behind the proxy: not a Rust bug.
             Some((field, path)) if htu => {
                 tracing::info!(
@@ -548,9 +570,14 @@ pub(crate) fn tee(
 /// Node's body with its `content-encoding` (Effect's `br`, `gzip`, `deflate`) undone, capped at
 /// `TEE_LIMIT`; `None` for another coding or a corrupt body.
 pub fn decoded(enc: Option<&HeaderValue>, body: Bytes) -> Option<Bytes> {
+    decoded_up_to(enc, body, TEE_LIMIT)
+}
+
+/// `decoded` capped at `max` decoded bytes.
+pub fn decoded_up_to(enc: Option<&HeaderValue>, body: Bytes, max: u64) -> Option<Bytes> {
     use std::io::Read;
     let mut out = Vec::new();
-    let limit = TEE_LIMIT + 1;
+    let limit = max + 1;
     let r = match enc.map(|e| e.as_bytes()) {
         None | Some(b"identity") => return Some(body),
         Some(b"gzip") => flate2::read::GzDecoder::new(&body[..])
@@ -564,7 +591,7 @@ pub fn decoded(enc: Option<&HeaderValue>, body: Bytes) -> Option<Bytes> {
             .read_to_end(&mut out),
         Some(_) => return None,
     };
-    (r.is_ok() && out.len() as u64 <= TEE_LIMIT).then(|| out.into())
+    (r.is_ok() && out.len() as u64 <= max).then(|| out.into())
 }
 
 /// Passes `inner` through and sends a copy of the whole body on clean end.
@@ -808,6 +835,7 @@ mod tests {
         times: &["$.expiresAt", "$[*].issuedAt"],
         headers: Compare::AUTH_HEADERS,
         enrich: &[],
+        ..Compare::DEFAULT
     };
 
     #[test]
@@ -934,6 +962,76 @@ mod tests {
         assert_eq!(
             d(&p("null", 1), &p(r#"{"a":1}"#, 1)).as_deref(),
             Some("body $.projects[0].repositoryIdentity")
+        );
+    }
+
+    #[test]
+    fn a_differing_sequence_is_skew_not_a_mismatch() {
+        const S: Compare = Compare {
+            skew: &["snapshotSequence"],
+            ..Compare::DEFAULT
+        };
+        let ct = ("content-type", "application/json");
+        let d = |n: &str, r: &str| {
+            diff(
+                &S,
+                StatusCode::OK,
+                &hm(&[ct]),
+                n.as_bytes(),
+                &rust(200, &[ct], r),
+            )
+            .map(|(f, p)| format!("{f} {p}"))
+        };
+        assert_eq!(
+            d(
+                r#"{"snapshotSequence":3,"t":[1]}"#,
+                r#"{"snapshotSequence":3,"t":[1]}"#
+            ),
+            None
+        );
+        assert_eq!(
+            d(
+                r#"{"snapshotSequence":3,"t":[1]}"#,
+                r#"{"snapshotSequence":4,"t":[2]}"#
+            )
+            .as_deref(),
+            Some("sequence_skew $.snapshotSequence")
+        );
+        // Same sequence: every other difference is a mismatch.
+        assert_eq!(
+            d(
+                r#"{"snapshotSequence":3,"t":[1]}"#,
+                r#"{"snapshotSequence":3,"t":[2]}"#
+            )
+            .as_deref(),
+            Some("body $.t[0]")
+        );
+        // Without `skew` a differing sequence is a mismatch.
+        let plain = diff(
+            &Compare::DEFAULT,
+            StatusCode::OK,
+            &hm(&[ct]),
+            br#"{"snapshotSequence":3}"#,
+            &rust(200, &[ct], r#"{"snapshotSequence":4}"#),
+        );
+        assert_eq!(plain.map(|(f, _)| f), Some("body"));
+    }
+
+    #[test]
+    fn decoded_up_to_caps_the_decoded_size() {
+        let big = vec![b' '; (TEE_LIMIT + 10) as usize];
+        assert_eq!(
+            decoded(None, big.clone().into()).map(|b| b.len()),
+            Some(big.len())
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &big).unwrap();
+        let gz = gz.finish().unwrap();
+        let enc = HeaderValue::from_static("gzip");
+        assert_eq!(decoded(Some(&enc), gz.clone().into()), None);
+        assert_eq!(
+            decoded_up_to(Some(&enc), gz.into(), 64 << 20).map(|b| b.len()),
+            Some(big.len())
         );
     }
 

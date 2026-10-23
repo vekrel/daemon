@@ -903,6 +903,7 @@ impl RouteHandler for BrowserSession {
             times: &["$.expiresAt"],
             headers: Compare::AUTH_HEADERS,
             enrich: &[],
+            ..Compare::DEFAULT
         }
     }
 
@@ -963,6 +964,7 @@ impl RouteHandler for Token {
             times: &[],
             headers: Compare::AUTH_HEADERS,
             enrich: &[],
+            ..Compare::DEFAULT
         }
     }
 

@@ -38,12 +38,17 @@ pub fn trace_id() -> String {
 
 /// A JSON response with the headers Node sends on machine routes besides length/date.
 pub fn json(status: StatusCode, body: &impl Serialize) -> Response<Bytes> {
+    json_bytes(status, serde_json::to_vec(body).expect("serializable"))
+}
+
+/// `json` for an already encoded body.
+pub fn json_bytes(status: StatusCode, body: Vec<u8>) -> Response<Bytes> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::VARY, "Accept-Encoding")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(serde_json::to_vec(body).expect("serializable").into())
+        .body(body.into())
         .expect("valid response")
 }
 

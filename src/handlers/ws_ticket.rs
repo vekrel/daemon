@@ -45,6 +45,7 @@ impl RouteHandler for WsTicket {
             times: &["$.expiresAt"],
             headers: Compare::AUTH_HEADERS,
             enrich: &[],
+            ..Compare::DEFAULT
         }
     }
 

@@ -52,6 +52,9 @@ type GateKey = (i64, i64, Option<i64>);
 pub struct StateDb {
     path: PathBuf,
     gate: Mutex<Option<(GateKey, bool)>>,
+    /// One idle connection kept between reads: opening one costs 40-60 ms under load (6B Task 7).
+    /// A concurrent read opens its own; a connection whose read failed is dropped.
+    idle: Mutex<Option<Connection>>,
 }
 
 impl StateDb {
@@ -59,6 +62,7 @@ impl StateDb {
         StateDb {
             path: state_dir.join("statev2.sqlite"),
             gate: Mutex::new(None),
+            idle: Mutex::new(None),
         }
     }
 
@@ -68,7 +72,23 @@ impl StateDb {
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, Decline> {
-        let mut c = open(&self.path)?;
+        let idle = self.idle.lock().expect("idle lock").take();
+        let mut c = match idle {
+            Some(c) => c,
+            None => open(&self.path)?,
+        };
+        let out = Self::read_on(&self.gate, &mut c, f);
+        if out.is_ok() {
+            *self.idle.lock().expect("idle lock") = Some(c);
+        }
+        out
+    }
+
+    fn read_on<T>(
+        gate: &Mutex<Option<(GateKey, bool)>>,
+        c: &mut Connection,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, Decline> {
         let tx = c.transaction()?;
         // The first read starts the snapshot, so the gate and `f` see the same schema.
         let version: i64 = tx.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
@@ -78,7 +98,7 @@ impl StateDb {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let key = (version, n, max);
-        let cached = *self.gate.lock().expect("gate lock");
+        let cached = *gate.lock().expect("gate lock");
         let ok = match cached {
             Some((k, ok)) if k == key => ok,
             _ => {
@@ -89,7 +109,7 @@ impl StateDb {
                         false
                     }
                 };
-                *self.gate.lock().expect("gate lock") = Some((key, ok));
+                *gate.lock().expect("gate lock") = Some((key, ok));
                 ok
             }
         };
@@ -163,6 +183,21 @@ pub(crate) mod tests {
         assert_eq!(db.read(|c| c.execute("SELECT nope", [])), Err(Decline::Sql));
         let missing = StateDb::new(&dir.path().join("nowhere"));
         assert_eq!(count(&missing), Err(Decline::Sql));
+    }
+
+    #[test]
+    fn reads_reuse_one_idle_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = fixture(dir.path(), "");
+        // A per-connection setting survives only on the same connection.
+        db.read(|c| c.execute_batch("PRAGMA cache_size = -1234"))
+            .unwrap();
+        let size = db.read(|c| c.query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0)));
+        assert_eq!(size, Ok(-1234));
+        // A failed read drops its connection.
+        assert_eq!(db.read(|c| c.execute("SELECT nope", [])), Err(Decline::Sql));
+        let size = db.read(|c| c.query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0)));
+        assert_ne!(size, Ok(-1234));
     }
 
     #[test]

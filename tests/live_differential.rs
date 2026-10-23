@@ -4753,3 +4753,727 @@ fn archived_shell_shadow_matches_node_while_threads_move() {
     drop(d);
     assert!(!home.exists());
 }
+
+// ---- GET /api/orchestration/shell (plan 6B Task 8) ----
+
+const SHELL: &str = "GET /api/orchestration/shell";
+
+/// Shadow outcomes logged for `route`, by outcome; an enrichment-only mismatch is `ENRICHED`.
+/// Prints every line that is not a match, decline, enrichment or sequence skew.
+fn route_outcomes(home: &Path, route: &str) -> std::collections::BTreeMap<String, usize> {
+    std::thread::sleep(Duration::from_millis(300));
+    let mut m = std::collections::BTreeMap::new();
+    for l in log(home).lines() {
+        if !l.contains(&format!("route=\"{route}\"")) || l.contains("rust shell builder") {
+            continue;
+        }
+        if let Some(o) = l.split("outcome=").nth(1) {
+            let mut o = o.split_whitespace().next().unwrap().trim_matches('"');
+            if o == "mismatch" && l.contains("field=\"enrichment\"") {
+                o = ENRICHED;
+            }
+            // Effect's chunked 400 for a missing protocol header, which Rust declines anyway.
+            if o == "skipped_large" && l.contains("status=400") {
+                o = "skipped_400";
+            }
+            *m.entry(o.to_owned()).or_default() += 1;
+            if ![
+                "match",
+                "declined",
+                ENRICHED,
+                "sequence_skew",
+                "skipped_400",
+            ]
+            .contains(&o)
+            {
+                println!("{l}");
+            }
+        }
+    }
+    m
+}
+
+/// Outcomes other than match / declined / enrichment / skew.
+fn bad_outcomes(o: &std::collections::BTreeMap<String, usize>) -> usize {
+    o.iter()
+        .filter(|(k, _)| {
+            ![
+                "match",
+                "declined",
+                ENRICHED,
+                "sequence_skew",
+                "skipped_400",
+            ]
+            .contains(&k.as_str())
+        })
+        .map(|(_, n)| n)
+        .sum()
+}
+
+/// `GET /api/orchestration/shell` through `base` → (status, headers, decoded body).
+fn shell_get(
+    rt: &tokio::runtime::Runtime,
+    http: &reqwest::Client,
+    base: &str,
+    cookie: Option<&str>,
+    ae: Option<&str>,
+) -> (u16, reqwest::header::HeaderMap, String) {
+    let mut h = vec![("x-t3-orchestration-protocol", "2")];
+    if let Some(c) = cookie {
+        h.push(("cookie", c));
+    }
+    if let Some(ae) = ae {
+        h.push(("accept-encoding", ae));
+    }
+    let (s, nh, nb) = rt.block_on(raw_get(
+        http,
+        &format!("{base}/api/orchestration/shell"),
+        &h,
+    ));
+    let plain =
+        vekrel::http_seam::decoded_up_to(nh.get("content-encoding"), nb.into(), 1 << 30).unwrap();
+    (s, nh, String::from_utf8(plain.to_vec()).unwrap())
+}
+
+/// Plan 6B Task 8: the shell route in shadow over the Task 6 scenarios, a git workspace Node
+/// enriches, rows and threads Rust declines, Node's 401 and the protocol-header 400. Configured
+/// `serve`, it is downgraded to shadow at startup (Rust cannot see Node's enrichment cache).
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn shell_shadow_matches_node() {
+    use vekrel::shell::fixture;
+    let Some((d, base, home, token)) = start_with("shell-shadow", |home, cmd| {
+        isolate_engine(home, cmd);
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(&cfg, t + &format!("\"{SHELL}\" = \"serve\"\n")).unwrap();
+    }) else {
+        return;
+    };
+    assert!(
+        log(&home).contains("GET /api/orchestration/shell runs in shadow"),
+        "startup warning"
+    );
+    let ck = pair(&base, &home, &token);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let write = |sql: &str| {
+        let c = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+        c.busy_timeout(Duration::from_secs(20)).unwrap();
+        c.execute_batch(&format!("BEGIN IMMEDIATE; {sql} COMMIT;"))
+            .unwrap();
+    };
+    let round = || {
+        for ae in [None, Some("gzip"), Some("br"), Some("gzip, deflate, br")] {
+            let (s, h, _) = shell_get(&rt, &http, &base, Some(&ck), ae);
+            assert_eq!(s, 200);
+            assert!(h.get("x-vekrel-served-by").is_none(), "Node answers");
+        }
+    };
+    round();
+    write(&fixture::scenarios().0);
+    let before_db = dump_orchestration(&home.join("userdata/statev2.sqlite"));
+    round();
+    round();
+    let (_, _, body) = shell_get(&rt, &http, &base, Some(&ck), None);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    println!(
+        "fixture shell: {} threads, {} bytes",
+        v["threads"].as_array().unwrap().len(),
+        body.len()
+    );
+    let fixtures = route_outcomes(&home, SHELL);
+    // Reads change nothing (no writer runs on this isolated engine).
+    assert_eq!(
+        before_db,
+        dump_orchestration(&home.join("userdata/statev2.sqlite")),
+        "tables unchanged"
+    );
+
+    // Node's 401 without a session; without the protocol header Node's 400 and Rust declines.
+    let (s, _, _) = shell_get(&rt, &http, &base, None, None);
+    assert_eq!(s, 401);
+    let declined_before = fixtures.get("declined").copied().unwrap_or(0);
+    let (s, _, _) = rt.block_on(raw_get(
+        &http,
+        &format!("{base}/api/orchestration/shell"),
+        &[("cookie", ck.as_str())],
+    ));
+    assert_eq!(s, 400);
+
+    // A drifted thread: Node 500, Rust declines.
+    let mut drift = fixture::Fx::default();
+    drift.thread("fx-drift", 40, serde_json::json!({"runtimeMode": "turbo"}));
+    write(&drift.0);
+    assert_eq!(shell_get(&rt, &http, &base, Some(&ck), None).0, 500);
+    write("DELETE FROM orchestration_v2_projection_threads WHERE thread_id = 'fx-drift';");
+    // A project row Node reshapes (an untrimmed title): Rust declines.
+    write(&format!(
+        "INSERT INTO projection_projects ({PROJECT_COLS}) VALUES \
+         ('p-pad', ' padded', '/w', NULL, NULL, 0, NULL, NULL, '[]', 'c', 'u', NULL);"
+    ));
+    shell_get(&rt, &http, &base, Some(&ck), None);
+    write("DELETE FROM projection_projects WHERE project_id = 'p-pad';");
+    let declines = route_outcomes(&home, SHELL)
+        .get("declined")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(declines - declined_before, 3, "header, drift, row");
+
+    // A git workspace: once Node's cache is warm its repositoryIdentity differs from Rust's null.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    write(&format!(
+        "INSERT INTO projection_projects ({PROJECT_COLS}) VALUES \
+         ('git', 'Daemon', '{repo}', NULL, NULL, 0, NULL, NULL, '[]', 'c', 'u', NULL);"
+    ));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, _, b) = shell_get(&rt, &http, &base, Some(&ck), None);
+        let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+        let git = v["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "git")
+            .cloned();
+        if git.is_some_and(|p| !p["repositoryIdentity"].is_null()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Node never enriched the repo");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let all = route_outcomes(&home, SHELL);
+    println!("{SHELL} shadow outcomes: fixtures {fixtures:?}, all {all:?}");
+    assert_eq!(
+        bad_outcomes(&all),
+        0,
+        "no mismatch or skipped comparison: {all:?}"
+    );
+    assert!(
+        fixtures.get("match").copied().unwrap_or(0) >= 10,
+        "{fixtures:?}"
+    );
+    assert!(all.get(ENRICHED).copied().unwrap_or(0) >= 1, "{all:?}");
+    drop(d);
+    assert!(!home.exists());
+}
+
+// ---- convergence: Rust's snapshot, then Node's stream ----
+
+/// `mergeShellSnapshotProjects` + `applyShellStreamEvent` from Vekrel-Web
+/// `packages/client-runtime/src/state/shellReducer.ts` and `shell.ts` `applyItems`.
+#[derive(Default)]
+struct ShellClient {
+    state: Option<serde_json::Value>,
+    synchronized: bool,
+}
+
+impl ShellClient {
+    fn apply(&mut self, item: &serde_json::Value) {
+        use serde_json::Value;
+        let retain = |prev: Option<&Value>, next: &mut Value| {
+            if let Some(p) = prev
+                && next["repositoryIdentity"].is_null()
+                && !p["repositoryIdentity"].is_null()
+                && p["workspaceRoot"] == next["workspaceRoot"]
+            {
+                next["repositoryIdentity"] = p["repositoryIdentity"].clone();
+            }
+        };
+        let find = |s: &Value, key: &str, id: &Value| -> Option<Value> {
+            s[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == *id)
+                .cloned()
+        };
+        match item["kind"].as_str().unwrap() {
+            "synchronized" => self.synchronized = true,
+            "snapshot" => {
+                let next = item["snapshot"].clone();
+                let Some(prev) = self.state.take() else {
+                    self.state = Some(next);
+                    return;
+                };
+                if let Some(roots) = item["resolvedRepositoryIdentityRoots"].as_array() {
+                    let mut s = prev;
+                    for p in s["projects"].as_array_mut().unwrap() {
+                        let Some(c) = find(&next, "projects", &p["id"]) else {
+                            continue;
+                        };
+                        if c["workspaceRoot"] != p["workspaceRoot"] {
+                            continue;
+                        }
+                        if roots.contains(&p["workspaceRoot"])
+                            || (p["repositoryIdentity"].is_null()
+                                && !c["repositoryIdentity"].is_null())
+                        {
+                            p["repositoryIdentity"] = c["repositoryIdentity"].clone();
+                        }
+                    }
+                    self.state = Some(s);
+                } else {
+                    let mut n = next;
+                    for p in n["projects"].as_array_mut().unwrap() {
+                        let prior = find(&prev, "projects", &p["id"]);
+                        retain(prior.as_ref(), p);
+                    }
+                    self.state = Some(n);
+                }
+            }
+            kind => {
+                let Some(s) = self.state.as_mut() else { return };
+                let seq = item["sequence"].as_i64().unwrap();
+                if seq <= s["snapshotSequence"].as_i64().unwrap() {
+                    return;
+                }
+                let upsert = |list: &mut Value, v: Value| {
+                    let a = list.as_array_mut().unwrap();
+                    match a.iter().position(|x| x["id"] == v["id"]) {
+                        Some(i) => a[i] = v,
+                        None => a.push(v),
+                    }
+                };
+                let without = |list: &mut Value, id: &Value| {
+                    list.as_array_mut().unwrap().retain(|x| x["id"] != *id)
+                };
+                match kind {
+                    "project.updated" => {
+                        let mut p = item["project"].clone();
+                        let prior = find(s, "projects", &p["id"]);
+                        retain(prior.as_ref(), &mut p);
+                        upsert(&mut s["projects"], p);
+                    }
+                    "project.removed" => without(&mut s["projects"], &item["projectId"]),
+                    "thread.updated" => {
+                        let t = item["thread"].clone();
+                        if item["location"] == "active" {
+                            upsert(&mut s["threads"], t.clone());
+                        } else {
+                            without(&mut s["threads"], &t["id"]);
+                        }
+                        without(&mut s["archivedThreads"], &t["id"]);
+                    }
+                    "thread.removed" => {
+                        without(&mut s["threads"], &item["threadId"]);
+                        without(&mut s["archivedThreads"], &item["threadId"]);
+                    }
+                    _ => return,
+                }
+                s["snapshotSequence"] = seq.into();
+            }
+        }
+    }
+}
+
+/// A shell state by id, order-free, `repositoryIdentity` removed (Node's warm cache, Rust's null).
+fn shell_state(s: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for key in ["projects", "threads", "archivedThreads"] {
+        for x in s[key].as_array().unwrap() {
+            let mut x = x.clone();
+            x.as_object_mut().unwrap().remove("repositoryIdentity");
+            let text = String::from_utf8(vekrel::effect_json::to_vec(&x)).unwrap();
+            out.insert(format!("{key}:{}", x["id"].as_str().unwrap()), text);
+        }
+    }
+    out
+}
+
+/// Sends `{_tag: Request}` and returns the Exit's `exit` for unary `tag`.
+async fn ws_unary(c: &mut Ws, id: u64, tag: &str, payload: serde_json::Value) -> serde_json::Value {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let r = serde_json::json!({"_tag":"Request","id":id,"tag":tag,"payload":payload,"headers":[]});
+    c.send(Message::text(r.to_string())).await.unwrap();
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(60), c.next()).await;
+        let Ok(Some(Ok(Message::Text(t)))) = m else {
+            panic!("no frame: {m:?}")
+        };
+        let v: serde_json::Value = vekrel::effect_json::parse(t.as_str()).unwrap();
+        for f in v.as_array().cloned().unwrap_or(vec![v]) {
+            if f["_tag"] == "Exit" && f["requestId"] == id {
+                return f["exit"].clone();
+            }
+        }
+    }
+}
+
+/// One `orchestration.subscribeShell` on its own socket: Chunks are acked and their items queued.
+async fn subscribe_shell(
+    port: String,
+    cookie: String,
+    after: Option<i64>,
+    tx: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let mut c = auth_ws(&port, &cookie).await;
+    let mut payload = serde_json::json!({"requestCompletionMarker": true});
+    if let Some(a) = after {
+        payload["afterSequence"] = a.into();
+    }
+    let r = serde_json::json!({"_tag":"Request","id":7,"tag":"orchestration.subscribeShell",
+        "payload":payload,"headers":[]});
+    c.send(Message::text(r.to_string())).await.unwrap();
+    while let Some(Ok(m)) = c.next().await {
+        let Message::Text(t) = m else { continue };
+        let v: serde_json::Value = vekrel::effect_json::parse(t.as_str()).unwrap();
+        for f in v.as_array().cloned().unwrap_or(vec![v]) {
+            if f["_tag"] == "Chunk" && f["requestId"] == 7 {
+                c.send(Message::text(r#"{"_tag":"Ack","requestId":7}"#))
+                    .await
+                    .unwrap();
+                for i in f["values"].as_array().unwrap() {
+                    if tx.send(i.clone()).is_err() {
+                        return;
+                    }
+                }
+            } else if f["_tag"] == "Exit" {
+                panic!("shell stream ended: {f}");
+            }
+        }
+    }
+}
+
+/// Plan 6B Task 8, Review Focus 2. Each iteration: a Node writer creates and renames projects and
+/// threads and archives a thread through Node's RPCs (no turn, no provider); meanwhile client A
+/// takes Rust's shell snapshot (the route's exact bytes, `handlers::shell::snapshot`) and opens
+/// Node's `subscribeShell(afterSequence)`, and client B does the same from Node's HTTP shell. Once
+/// the writer is done and both streams are quiet, A, B and a fresh Node snapshot hold the same
+/// projects and threads (`repositoryIdentity` excluded).
+fn shell_convergence(tag: &str, owner_db: Option<std::ffi::OsString>, iterations: usize) {
+    use vekrel::shell::fixture;
+    let Some((d, base, home, token)) = start_with(tag, |home, cmd| {
+        isolate_engine(home, cmd);
+        if let Some(src) = owner_db.clone() {
+            let (dir, copy) = support::real_db::copy_from(Some(src)).unwrap();
+            std::fs::rename(&copy, home.join("userdata/statev2.sqlite")).unwrap();
+            drop(dir);
+        }
+    }) else {
+        return;
+    };
+    let ck = pair(&base, &home, &token);
+    let db_path = home.join("userdata/statev2.sqlite");
+    if owner_db.is_none() {
+        let c = rusqlite::Connection::open(&db_path).unwrap();
+        c.busy_timeout(Duration::from_secs(20)).unwrap();
+        c.execute_batch(&format!(
+            "BEGIN IMMEDIATE; {} COMMIT;",
+            fixture::scenarios().0
+        ))
+        .unwrap();
+    }
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let db = std::sync::Arc::new(vekrel::db::read::StateDb::new(&home.join("userdata")));
+    rt.block_on(async {
+        let mut c = auth_ws(&port, &ck).await;
+        let base = serde_json::json!({"type": "project.create", "commandId": "cv-cmd-base",
+            "projectId": "cv-base", "title": "Base", "workspaceRoot": home.join("ws-base").to_str().unwrap(),
+            "createWorkspaceRootIfMissing": true});
+        let exit = ws_unary(&mut c, 1, "projects.mutate", base).await;
+        assert_eq!(exit["_tag"], "Success", "{exit}");
+    });
+    let mut handoff_events = 0;
+    for i in 0..iterations {
+        let (ws_root, home2) = (home.join(format!("ws-{i}")), home.clone());
+        // Client A: Rust's snapshot first; Node's stream opens only after Node has written.
+        let (ta, mut ra) = tokio::sync::mpsc::unbounded_channel();
+        let (tb, mut rb) = tokio::sync::mpsc::unbounded_channel();
+        let snap = {
+            let db = db.clone();
+            rt.block_on(rt.spawn_blocking(move || vekrel::handlers::shell::snapshot(&db)))
+                .unwrap()
+                .unwrap_or_else(|why| panic!("Rust declined: {why}"))
+        };
+        let mut a = ShellClient::default();
+        let a_snap: serde_json::Value =
+            vekrel::effect_json::parse(std::str::from_utf8(&snap).unwrap()).unwrap();
+        let a_seq = a_snap["snapshotSequence"].as_i64().unwrap();
+        a.apply(&serde_json::json!({"kind": "snapshot", "snapshot": a_snap}));
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel::<()>();
+        let writer = {
+            let (port, ck) = (port.clone(), ck.clone());
+            rt.spawn(async move {
+                let mut c = auth_ws(&port, &ck).await;
+                let (p, t1, t2) = (
+                    format!("cv-p-{i}"),
+                    format!("cv-t-{i}-a"),
+                    format!("cv-t-{i}-b"),
+                );
+                let model = serde_json::json!({"instanceId": "codex", "model": "gpt-5-codex"});
+                let create = |t: &str, n: u64| {
+                    serde_json::json!({"type": "thread.create",
+                    "commandId": format!("cv-cmd-{i}-{n}"), "threadId": t, "projectId": p,
+                    "title": format!("Thread {t}"), "modelSelection": model,
+                    "runtimeMode": "full-access", "interactionMode": "default",
+                    "branch": null, "worktreePath": null,
+                    "createdBy": "user", "creationSource": "web"})
+                };
+                let ops: Vec<(&str, serde_json::Value)> = vec![
+                    (
+                        "projects.mutate",
+                        serde_json::json!({"type": "project.create",
+                        "commandId": format!("cv-cmd-{i}-0"), "projectId": p,
+                        "title": format!("Project {i}"),
+                        "workspaceRoot": ws_root.to_str().unwrap(),
+                        "createWorkspaceRootIfMissing": true}),
+                    ),
+                    ("orchestration.dispatchCommand", create(&t1, 1)),
+                    (
+                        "orchestration.dispatchCommand",
+                        serde_json::json!({"type": "thread.metadata.update",
+                        "commandId": format!("cv-cmd-{i}-2"), "threadId": t1,
+                        "title": format!("Renamed {i}")}),
+                    ),
+                    (
+                        "projects.mutate",
+                        serde_json::json!({"type": "project.update",
+                        "commandId": format!("cv-cmd-{i}-3"), "projectId": p,
+                        "title": format!("Project {i} renamed")}),
+                    ),
+                    ("orchestration.dispatchCommand", create(&t2, 4)),
+                    (
+                        "orchestration.dispatchCommand",
+                        serde_json::json!({"type": "thread.archive",
+                        "commandId": format!("cv-cmd-{i}-5"), "threadId": t1}),
+                    ),
+                ];
+                // A thread no later op touches: its events reach client A only through the
+                // replay after Rust's sequence (a snapshot sequence ahead of its rows loses it).
+                let mut lone = create(&format!("cv-t-{i}-lone"), 9);
+                lone["projectId"] = "cv-base".into();
+                let exit = ws_unary(&mut c, 99, "orchestration.dispatchCommand", lone).await;
+                assert_eq!(exit["_tag"], "Success", "{exit}");
+                let _ = first_tx.send(());
+                for (n, (tag, payload)) in ops.into_iter().enumerate() {
+                    let exit = ws_unary(&mut c, 100 + n as u64, tag, payload).await;
+                    assert_eq!(exit["_tag"], "Success", "{tag}: {exit}");
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                drop(home2);
+            })
+        };
+        rt.block_on(first_rx).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        let sub_a = rt.spawn(subscribe_shell(port.clone(), ck.clone(), Some(a_seq), ta));
+        // Client B: Node's HTTP snapshot, then Node's stream.
+        let (s, _, body) = shell_get(&rt, &http, &base, Some(&ck), Some("br"));
+        assert_eq!(s, 200, "{body}");
+        let mut b = ShellClient::default();
+        let b_snap = vekrel::effect_json::parse(&body).unwrap();
+        let b_seq = b_snap["snapshotSequence"].as_i64().unwrap();
+        b.apply(&serde_json::json!({"kind": "snapshot", "snapshot": b_snap}));
+        let sub_b = rt.spawn(subscribe_shell(port.clone(), ck.clone(), Some(b_seq), tb));
+        rt.block_on(writer).unwrap();
+        // Settle: both synchronized and 1.5 s without an item.
+        let mut a_items = 0;
+        rt.block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "streams never settled"
+                );
+                tokio::select! {
+                    Some(x) = ra.recv() => { a_items += 1; a.apply(&x) }
+                    Some(x) = rb.recv() => b.apply(&x),
+                    _ = tokio::time::sleep(Duration::from_millis(1500)) => {
+                        if a.synchronized && b.synchronized { break }
+                    }
+                }
+            }
+        });
+        let (s, _, fresh) = shell_get(&rt, &http, &base, Some(&ck), None);
+        assert_eq!(s, 200);
+        let fresh = shell_state(&vekrel::effect_json::parse(&fresh).unwrap());
+        let (sa, sb) = (
+            shell_state(a.state.as_ref().unwrap()),
+            shell_state(b.state.as_ref().unwrap()),
+        );
+        let diff = |x: &std::collections::BTreeMap<String, String>| -> Vec<String> {
+            fresh
+                .iter()
+                .filter(|(k, v)| x.get(*k) != Some(v))
+                .map(|(k, _)| k.clone())
+                .chain(x.keys().filter(|k| !fresh.contains_key(*k)).cloned())
+                .collect()
+        };
+        println!(
+            "iteration {i}: Rust seq {a_seq}, Node seq {b_seq}, {a_items} items after Rust's snapshot, {} entries; differ A {:?} B {:?}",
+            fresh.len(),
+            diff(&sa),
+            diff(&sb)
+        );
+        assert!(
+            diff(&sa).is_empty() && diff(&sb).is_empty(),
+            "iteration {i} did not converge"
+        );
+        assert!(sa.contains_key(&format!("threads:cv-t-{i}-b")));
+        assert!(sa.contains_key(&format!("threads:cv-t-{i}-lone")));
+        assert!(
+            !sa.contains_key(&format!("threads:cv-t-{i}-a")),
+            "archived thread left the shell"
+        );
+        handoff_events += a_items;
+        sub_a.abort();
+        sub_b.abort();
+    }
+    println!(
+        "CONVERGENCE {tag}: {iterations}/{iterations} iterations converged, {handoff_events} stream items after Rust's snapshots"
+    );
+    drop(db);
+    drop(d);
+    assert!(!home.exists());
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn shell_rust_snapshot_then_node_stream_converges() {
+    shell_convergence("shell-converge", None, 20);
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs> and VEKREL_REAL_DB"]
+fn shell_rust_snapshot_then_node_stream_converges_on_owner_db() {
+    let Some(src) = std::env::var_os("VEKREL_REAL_DB") else {
+        eprintln!("VEKREL_REAL_DB unset: skipping the owner-DB test");
+        return;
+    };
+    shell_convergence("shell-converge-owner", Some(src), 20);
+}
+
+/// A cheap fingerprint of every `orchestration*` / `projection*` table: row count and max rowid.
+fn table_fingerprint(db: &Path) -> Vec<(String, i64, Option<i64>)> {
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    c.busy_timeout(Duration::from_secs(5)).unwrap();
+    let tables: Vec<String> = c
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND (name LIKE 'orchestration%' OR name LIKE 'projection%') ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    tables
+        .into_iter()
+        .map(|t| {
+            let (n, m) = c
+                .query_row(
+                    &format!("SELECT count(*), max(rowid) FROM \"{t}\""),
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            (t, n, m)
+        })
+        .collect()
+}
+
+/// Plan 6B Task 8 on a copy of the owner's DB: the shadowed route matches Node (0 mismatches
+/// beyond enrichment), Rust declines nothing, Rust's reads leave the tables as they were, and
+/// timing for both sides.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs> and VEKREL_REAL_DB"]
+fn shell_shadow_matches_node_on_owner_db() {
+    let Some(src) = std::env::var_os("VEKREL_REAL_DB") else {
+        eprintln!("VEKREL_REAL_DB unset: skipping the owner-DB test");
+        return;
+    };
+    let Some((d, base, home, token)) = start_with("shell-owner-shadow", |home, cmd| {
+        isolate_engine(home, cmd);
+        let (dir, copy) = support::real_db::copy_from(Some(src)).unwrap();
+        std::fs::rename(&copy, home.join("userdata/statev2.sqlite")).unwrap();
+        drop(dir);
+    }) else {
+        return;
+    };
+    let ck = pair(&base, &home, &token);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let mut size = 0;
+    for ae in [
+        None,
+        Some("gzip"),
+        Some("br"),
+        Some("gzip, deflate, br"),
+        None,
+        Some("br"),
+    ] {
+        let (s, h, b) = shell_get(&rt, &http, &base, Some(&ck), ae);
+        assert_eq!(s, 200);
+        assert!(h.get("x-vekrel-served-by").is_none());
+        size = b.len();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let o = route_outcomes(&home, SHELL);
+    println!("OWNER shell shadow: {size} bytes, outcomes {o:?}");
+    assert_eq!(bad_outcomes(&o), 0, "{o:?}");
+    assert_eq!(o.get("declined").copied().unwrap_or(0), 0, "{o:?}");
+    let compared = o.get("match").copied().unwrap_or(0)
+        + o.get(ENRICHED).copied().unwrap_or(0)
+        + o.get("sequence_skew").copied().unwrap_or(0);
+    assert_eq!(compared, 6, "{o:?}");
+
+    // Timing: Node on its own port (uncompressed and br) vs Rust's route body, warm connection.
+    let median = |mut v: Vec<u128>| {
+        v.sort();
+        v[v.len() / 2]
+    };
+    let engine = engine_base(&home);
+    let mut node = (vec![], vec![]);
+    for _ in 0..7 {
+        let t = Instant::now();
+        assert_eq!(shell_get(&rt, &http, &engine, Some(&ck), None).0, 200);
+        node.0.push(t.elapsed().as_millis());
+        let t = Instant::now();
+        assert_eq!(shell_get(&rt, &http, &engine, Some(&ck), Some("br")).0, 200);
+        node.1.push(t.elapsed().as_millis());
+    }
+    let db_path = home.join("userdata/statev2.sqlite");
+    let before = table_fingerprint(&db_path);
+    let db = vekrel::db::read::StateDb::new(&home.join("userdata"));
+    let (mut rust, mut br) = (vec![], vec![]);
+    let t = Instant::now();
+    vekrel::handlers::shell::snapshot(&db).unwrap();
+    let cold = t.elapsed().as_millis();
+    for _ in 0..7 {
+        let t = Instant::now();
+        let body = vekrel::handlers::shell::snapshot(&db).unwrap();
+        rust.push(t.elapsed().as_millis());
+        let t = Instant::now();
+        let _ = vekrel::compression::compress(
+            Some("br"),
+            vekrel::http_errors::json_bytes(axum::http::StatusCode::OK, body),
+        );
+        br.push(t.elapsed().as_millis());
+    }
+    let after = table_fingerprint(&db_path);
+    println!(
+        "TIMING owner shell ({}): Node median {} ms (identity), {} ms (br), over HTTP; Rust median {} ms (body) + {} ms (br), first read {cold} ms, in process",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        median(node.0),
+        median(node.1),
+        median(rust),
+        median(br)
+    );
+    assert_eq!(
+        before, after,
+        "orchestration/projection tables unchanged by Rust's reads"
+    );
+    drop(d);
+    assert!(!home.exists());
+}
