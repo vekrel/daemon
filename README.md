@@ -9,7 +9,7 @@
 
 The Rust daemon that runs on each machine. `vekrel serve` supervises the Vekrel engine (Node) on a loopback port and fronts it on one public port.
 
-The engine restarts with exponential backoff (1s doubling, 30s cap, reset after 60s up) if it crashes; a clean exit is not restarted. `GET /healthz` on the public port returns `{"engine":"up"|"down","restarts":N}`. The engine child gets `VEKREL_PORT`, `VEKREL_HOST=127.0.0.1`, `VEKREL_NO_BROWSER=1`.
+The engine restarts with exponential backoff (1s doubling, 30s cap, reset after 60s up) if it crashes; a clean exit is not restarted. `GET /healthz` on the public port returns `{"engine":"up"|"down","restarts":N}`. The engine child gets `VEKREL_PORT`, `VEKREL_HOST=127.0.0.1`, `VEKREL_NO_BROWSER=1`, `VEKREL_ADVERTISED_ORIGIN=http://127.0.0.1:<public port>` (so printed URLs and the QR point at the daemon).
 
 ## Config
 
