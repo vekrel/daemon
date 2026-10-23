@@ -313,8 +313,9 @@ pub struct VerifiedSession {
 pub enum WsSession {
     /// Rust checks each RPC's scope against it; a missing scope is `MachineAuthorizationError`.
     Verified(VerifiedSession),
-    /// Rust cannot evaluate the session Node accepted (an unsure `wsTicket`, DPoP, no or rejected
-    /// credential, key/DB unreadable, engine config Rust cannot reproduce): Node answers.
+    /// Rust cannot evaluate the session Node accepted (an unsure `wsTicket`, a DPoP proof Rust
+    /// cannot check, no or rejected credential, key/DB unreadable, engine config Rust cannot
+    /// reproduce): Node answers.
     Deferred,
     /// A `wsTicket` Node must reject (401) for this reason. Rust still forwards the upgrade, so if
     /// Node accepts it anyway this acts as `Deferred`.

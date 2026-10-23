@@ -1027,7 +1027,8 @@ async fn serve_with_ws_ticket_answers_with_row_scopes_and_logs_verdict() {
 // ---- streams ----
 
 /// `test.stream` (`filesystem:read`): Chunk `i` is `[{"i":i}]`, forever, or `payload.end` chunks
-/// then the end; `{"fail":e}` fails with `e` after one chunk; `{"decline":true}` declines.
+/// then the end; `{"fail":e}` fails with `e` after one chunk; `{"decline":true}` declines;
+/// `{"slow":true}` delays every item after the first.
 /// `pulled` counts items the seam took; `dropped` is set when the producer is dropped.
 #[derive(Default)]
 struct Counter {
@@ -1052,6 +1053,7 @@ impl StreamHandler for Counter {
             let (pulled, guard) = (self.pulled.clone(), SetOnDrop(self.dropped.clone()));
             let end = payload["end"].as_u64();
             let fail = payload.get("fail").cloned();
+            let slow = payload.get("slow").is_some();
             let s = futures_util::stream::unfold(0u64, move |i| {
                 let _keep = &guard;
                 let n = pulled.fetch_add(1, Ordering::SeqCst);
@@ -1062,7 +1064,13 @@ impl StreamHandler for Counter {
                     _ => Some(Ok(vec![json!({"i": i})])),
                 };
                 let _ = n;
-                async move { item.map(|it| (it, i + 1)) }
+                async move {
+                    // `slow`: every item after the first takes 300 ms.
+                    if slow && i > 0 {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                    item.map(|it| (it, i + 1))
+                }
             });
             Some(Box::pin(s) as Chunks)
         }
@@ -1454,4 +1462,58 @@ async fn auth_access_declines_when_a_socket_or_link_may_bypass_rust() {
     let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
     send(&mut c, &req).await;
     assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
+}
+
+#[tokio::test]
+async fn acks_beyond_the_unacked_chunks_are_dropped() {
+    let e = env("st-extra-ack", "[]");
+    let h = Arc::new(Counter::default());
+    let r = rig(stream_seam(Mode::Serve, h.clone(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.stream", json!({"slow":true}))).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":0}]"#));
+    // The extra Acks arrive while the next Chunk is still being produced: nothing is unacked.
+    send(&mut c, &ack(1)).await;
+    send(&mut c, &ack(1)).await;
+    send(&mut c, &ack(1)).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":1}]"#));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_quiet(&mut c).await;
+    assert_eq!(h.pulled.load(Ordering::SeqCst), 2, "one Chunk per real Ack");
+    drop(r);
+}
+
+#[tokio::test]
+async fn auth_access_hands_off_to_node_when_a_bypass_appears_mid_stream() {
+    let (logs, _g) = Logs::capture();
+    let (_dir, files, _w) = access_env();
+    let s = access_seam(Mode::Serve, &files);
+    let reg = s.registry().clone();
+    let mut r = rig(s).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    // The fake engine answers this exact request with one Chunk, then its Exit.
+    let req = r#"{"_tag":"Request","id":1,"tag":"subscribeAuthAccess","payload":{"nodeChunks":[[{"type":"snapshot","from":"node"}]]},"headers":[]}"#;
+    send(&mut c, req).await;
+    assert_eq!(
+        values(&recv(&mut c).await)[0]["revision"],
+        1,
+        "Rust's snapshot"
+    );
+    send(&mut c, &ack(1)).await;
+    // A socket Rust cannot attribute appears: `connected` is no longer knowable.
+    let _u = connect(r.proxy, "", &[]).await;
+    assert_eq!(
+        next_ev(&mut r).await,
+        format!("text:{req}"),
+        "original bytes, same id"
+    );
+    assert_eq!(
+        recv(&mut c).await,
+        chunk(1, r#"[{"type":"snapshot","from":"node"}]"#)
+    );
+    // Node owns the id now: the client's Ack goes to Node.
+    send(&mut c, &ack(1)).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{}", ack(1)));
+    assert!(reg.unattributed() >= 1);
+    assert_eq!(logs.lines("auth_access_handoff").len(), 1);
 }

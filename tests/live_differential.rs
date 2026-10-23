@@ -1557,3 +1557,87 @@ fn auth_access_served_events_converge_to_a_fresh_snapshot() {
     drop(d);
     assert!(!home.exists());
 }
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn auth_access_hands_off_to_node_when_a_cloud_link_appears() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let Some((d, base, home, token)) = start_with("access-handoff", |home, _| {
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap() + "\"subscribeAuthAccess\" = \"serve\"\n";
+        std::fs::write(&cfg, t).unwrap();
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut c = rt.block_on(auth_ws(&port, &cookie));
+    let mut state = json!({});
+    let mut snapshots = 0;
+    for e in
+        serde_json::from_str::<Vec<Value>>(&rt.block_on(subscribe_first_chunk(&mut c, 1))).unwrap()
+    {
+        apply_auth_event(&mut state, &e);
+    }
+    let drain = |c: &mut Ws, state: &mut Value, snapshots: &mut usize| {
+        rt.block_on(async {
+            loop {
+                let Ok(m) = tokio::time::timeout(Duration::from_millis(1500), c.next()).await
+                else {
+                    return;
+                };
+                let Some(Ok(Message::Text(t))) = m else {
+                    panic!("socket ended: {m:?}")
+                };
+                let f: Value = serde_json::from_str(t.as_str()).unwrap();
+                if f["requestId"] != 1 {
+                    continue;
+                }
+                assert_eq!(f["_tag"], "Chunk", "{f}");
+                for e in f["values"].as_array().unwrap() {
+                    *snapshots += usize::from(e["type"] == "snapshot");
+                    apply_auth_event(state, e);
+                }
+                c.send(Message::text(r#"{"_tag":"Ack","requestId":1}"#))
+                    .await
+                    .unwrap();
+            }
+        })
+    };
+    // A cloud link appears: sockets may now reach Node through the tunnel.
+    std::fs::write(
+        home.join("userdata/secrets/cloud-relay-url.bin"),
+        b"https://relay.invalid",
+    )
+    .unwrap();
+    drain(&mut c, &mut state, &mut snapshots);
+    assert_eq!(snapshots, 1, "Node's snapshot after the handoff: {state}");
+    // Node's stream carries the next change.
+    post(
+        &base,
+        &cookie,
+        "/api/auth/pairing-token",
+        r#"{"label":"After"}"#,
+    );
+    drain(&mut c, &mut state, &mut snapshots);
+    assert!(
+        state["pairingLinks"].to_string().contains("After"),
+        "{state}"
+    );
+    let links = get(&base, &cookie, "/api/auth/pairing-links");
+    let clients = get(&base, &cookie, "/api/auth/clients");
+    assert_eq!(by_key(&state["pairingLinks"], "id"), by_key(&links, "id"));
+    assert_eq!(
+        by_key(&state["clientSessions"], "sessionId"),
+        by_key(&clients, "sessionId")
+    );
+    let l = log(&home);
+    assert_eq!(l.matches("auth_access_handoff").count(), 1, "{l}");
+    drop(c);
+    drop(d);
+    assert!(!home.exists());
+}

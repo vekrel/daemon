@@ -12,7 +12,7 @@ use crate::{
     config::Mode,
     http_seam::parse_iso,
     machine::normalize,
-    rpc_seam::{Chunks, StreamHandler},
+    rpc_seam::{Chunks, HANDOFF, StreamHandler},
 };
 use futures_util::{FutureExt, future::BoxFuture};
 use rusqlite::{Connection, OpenFlags};
@@ -53,24 +53,35 @@ const CLOUD_SECRETS: [&str; 3] = [
 ];
 
 pub struct AuthAccess {
+    inputs: Arc<Inputs>,
+    poll: Duration,
+}
+
+/// What a stream reads: the DB, the registry, and what says whether the registry sees everything.
+struct Inputs {
     files: Arc<AuthFiles>,
     registry: Arc<Registry>,
     /// The engine runs Tailscale Serve, which proxies to Node's own port.
     tailscale: bool,
-    poll: Duration,
 }
 
 impl AuthAccess {
     pub fn new(files: Arc<AuthFiles>, registry: Arc<Registry>, tailscale: bool) -> Self {
-        AuthAccess {
+        let inputs = Arc::new(Inputs {
             files,
             registry,
             tailscale,
+        });
+        AuthAccess {
+            inputs,
             poll: Duration::from_millis(250),
         }
     }
+}
 
-    /// Why some socket may be invisible to the registry, if one may be.
+impl Inputs {
+    /// Why some socket may be invisible to the registry, if one may be. Checked at subscribe and
+    /// on every wake of a live stream (which then hands the request to Node).
     fn bypass(&self) -> Option<&'static str> {
         if self.tailscale {
             return Some("tailscale_serve");
@@ -113,15 +124,16 @@ impl StreamHandler for AuthAccess {
             if !payload.is_object() {
                 return None;
             }
-            if let Some(why) = self.bypass() {
+            let inputs = &self.inputs;
+            if let Some(why) = inputs.bypass() {
                 tracing::info!(why, "subscribeAuthAccess declined");
                 return None;
             }
-            let mut watch = self.registry.subscribe();
+            let mut watch = inputs.registry.subscribe();
             watch.mark_unchanged();
             let (db, reg, cur) = (
-                self.files.db_path().to_owned(),
-                self.registry.clone(),
+                inputs.files.db_path().to_owned(),
+                inputs.registry.clone(),
                 current.clone(),
             );
             let first = tokio::task::spawn_blocking(move || {
@@ -147,8 +159,9 @@ impl StreamHandler for AuthAccess {
                 revision: 1,
                 watch,
                 current,
-                registry: self.registry.clone(),
+                inputs: inputs.clone(),
                 poll: self.poll,
+                pending: false,
             };
             let first = futures_util::stream::once(async move { Ok(vec![snapshot]) });
             let live = futures_util::stream::unfold(st, |mut st| async move {
@@ -170,31 +183,51 @@ struct Live {
     revision: u64,
     watch: tokio::sync::watch::Receiver<()>,
     current: String,
-    registry: Arc<Registry>,
+    inputs: Arc<Inputs>,
     poll: Duration,
+    /// A socket change whose re-read failed: re-read on the next poll even if `data_version`
+    /// has not moved.
+    pending: bool,
+}
+
+/// What one wake found.
+enum Wake {
+    Same,
+    Lists(i64, Lists),
+    /// A socket may now bypass the registry: hand the request to Node.
+    Bypass(&'static str),
 }
 
 impl Live {
-    /// The next batch of events (one Chunk); `Some(Err)` ends the stream.
+    /// The next batch of events (one Chunk); `Some(Err)` ends the stream, an empty `Ok` hands it
+    /// to Node. Polled only after the client acked the previous Chunk, so a handoff never leaves
+    /// a Rust Chunk unacked.
     async fn next(&mut self) -> Option<Result<Vec<Value>, Value>> {
         loop {
             let sockets = tokio::select! {
                 _ = tokio::time::sleep(self.poll) => false,
                 r = self.watch.changed() => r.is_ok(),
             };
-            let (conn, ids, cur, dv) = (
+            self.pending |= sockets;
+            let (conn, inputs, cur, dv, reread) = (
                 self.conn.take()?,
-                self.registry.connected_ids(),
+                self.inputs.clone(),
                 self.current.clone(),
                 self.dv,
+                self.pending,
             );
             let r = tokio::task::spawn_blocking(move || {
-                let r = data_version(&conn).and_then(|v| {
-                    if v == dv && !sockets {
-                        return Ok((v, None));
+                let r = (|| -> Result<Wake, String> {
+                    if let Some(why) = inputs.bypass() {
+                        return Ok(Wake::Bypass(why));
                     }
-                    Ok((v, Some(read(&conn, &ids, &cur, now_ms())?)))
-                });
+                    let v = data_version(&conn)?;
+                    if v == dv && !reread {
+                        return Ok(Wake::Same);
+                    }
+                    let ids = inputs.registry.connected_ids();
+                    Ok(Wake::Lists(v, read(&conn, &ids, &cur, now_ms())?))
+                })();
                 (conn, r)
             })
             .await;
@@ -205,9 +238,13 @@ impl Live {
             };
             self.conn = Some(conn);
             match r {
-                Ok((_, None)) => {}
-                Ok((v, Some(next))) => {
-                    self.dv = v;
+                Ok(Wake::Same) => {}
+                Ok(Wake::Bypass(why)) => {
+                    tracing::info!(why, outcome = "auth_access_handoff", "subscribeAuthAccess");
+                    return Some(Ok(HANDOFF));
+                }
+                Ok(Wake::Lists(v, next)) => {
+                    (self.dv, self.pending) = (v, false);
                     let events = diff(&self.prev, &next, &mut self.revision);
                     self.prev = next;
                     if !events.is_empty() {

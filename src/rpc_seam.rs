@@ -47,9 +47,15 @@ pub trait UnaryHandler: Send + Sync {
     ) -> BoxFuture<'a, Option<Result<Value, Value>>>;
 }
 
-/// A stream's Chunks: each `Ok` is one Chunk's `values` (never empty); an `Err` ends the stream
-/// with Exit Failure `[{_tag:"Fail",error}]`; the end of the stream is Exit Success `null`.
+/// A stream's Chunks: each `Ok` is one Chunk's `values`; an `Err` ends the stream with Exit
+/// Failure `[{_tag:"Fail",error}]`; the end of the stream is Exit Success `null`. An empty `Ok`
+/// (`HANDOFF`) hands the request to Node: the seam forwards the original request under the same
+/// id and stops owning it. Items are pulled only after the previous Chunk's Ack, so no Rust Chunk
+/// is unacked at that point.
 pub type Chunks = BoxStream<'static, Result<Vec<Value>, Value>>;
+
+/// See `Chunks`.
+pub const HANDOFF: Vec<Value> = Vec::new();
 
 /// A Rust producer for one streaming RPC tag. Like Node, the seam sends a Chunk only after the
 /// client acked the previous one, and drops the producer on Interrupt or socket close.
@@ -321,6 +327,8 @@ struct Owned {
     raw: String,
     /// A stream's Ack signal: the producer waits for one per Chunk.
     ack: Option<UnboundedSender<()>>,
+    /// Chunks sent and not yet acked; Acks beyond these are dropped.
+    unacked: u32,
 }
 
 /// Per-connection routing state. Keys are the request id's JSON text.
@@ -395,10 +403,13 @@ impl Conn {
         match m.get("_tag").and_then(Value::as_str) {
             Some("Request") => self.request(m, raw, out),
             Some("Ack") => {
-                let Some(o) = key.and_then(|k| self.owned.get(&k)) else {
+                let Some(o) = key.and_then(|k| self.owned.get_mut(&k)) else {
                     return false;
                 };
-                if let Some(a) = &o.ack {
+                if let Some(a) = &o.ack
+                    && o.unacked > 0
+                {
+                    o.unacked -= 1;
                     let _ = a.send(());
                 }
                 true
@@ -479,7 +490,12 @@ impl Conn {
                         Some(ack)
                     }
                 };
-                let o = Owned { cancel, raw, ack };
+                let o = Owned {
+                    cancel,
+                    raw,
+                    ack,
+                    unacked: 0,
+                };
                 self.owned.insert(key, o);
                 true
             }
@@ -570,10 +586,10 @@ impl Conn {
     pub(crate) fn done(&mut self, d: Done) -> Option<Out> {
         if let Some(values) = d.chunk {
             // Dropped once the request is no longer owned (interrupted).
-            return self.owned.contains_key(&d.key).then(|| {
-                let c = json!({"_tag": "Chunk", "requestId": d.id, "values": values});
-                Out::Client(c.to_string())
-            });
+            let o = self.owned.get_mut(&d.key)?;
+            o.unacked += 1;
+            let c = json!({"_tag": "Chunk", "requestId": d.id, "values": values});
+            return Some(Out::Client(c.to_string()));
         }
         if let Some(o) = self.owned.remove(&d.key) {
             return Some(match d.exit {
@@ -691,6 +707,8 @@ async fn produce(
                 i = chunks.next() => i,
             };
             match item {
+                // Handoff: forwarded to Node like a decline.
+                Some(Ok(values)) if values.is_empty() => return Some(None),
                 Some(Ok(values)) => {
                     let d = Done {
                         key: k.clone(),
