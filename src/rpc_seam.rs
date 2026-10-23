@@ -382,6 +382,13 @@ impl Conn {
         self.node_stream.get_or_insert_with(|| reg.node_stream());
     }
 
+    /// Node's decoder reads binary frames as JSON too: any one may be a subscribe Node serves.
+    pub(crate) fn c2s_binary(&mut self) {
+        if !self.seam.is_empty() {
+            self.hold_node_stream();
+        }
+    }
+
     /// Routes a client text frame: what goes upstream, and frames Rust answers right away.
     pub(crate) fn c2s(&mut self, text: &str) -> (Fwd, Vec<String>) {
         let mut out = Vec::new();

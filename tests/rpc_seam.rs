@@ -199,7 +199,7 @@ impl UnaryHandler for Echo {
 
 // ---- rig ----
 
-/// Fake engine: reports every text frame it receives as `text:<raw>` and answers each
+/// Fake engine (skips binary frames, hangs up on a `drop` text): reports every text frame it receives as `text:<raw>` and answers each
 /// Request (also inside arrays) with `Exit Success` of `payload.node` (else the payload).
 /// A `spam` request first gets `payload.n` chunks of `payload.size` bytes.
 async fn upstream(ev: UnboundedSender<String>) -> u16 {
@@ -207,7 +207,11 @@ async fn upstream(ev: UnboundedSender<String>) -> u16 {
         "/ws",
         get(move |ws: WebSocketUpgrade| async move {
             ws.on_upgrade(move |mut s| async move {
-                while let Some(Ok(AxMsg::Text(t))) = s.next().await {
+                while let Some(Ok(m)) = s.next().await {
+                    let AxMsg::Text(t) = m else { continue };
+                    if t.as_str() == "drop" {
+                        break;
+                    }
                     let _ = ev.send(format!("text:{}", t.as_str()));
                     let items = match serde_json::from_str::<Value>(t.as_str()) {
                         Ok(Value::Array(a)) => a,
@@ -1572,8 +1576,8 @@ async fn a_node_owned_access_stream_is_counted_until_its_socket_closes_on_every_
         match path {
             "client" => c.close(None).await.unwrap(),
             "session" => assert_eq!(reg.close_session(SID), 1),
-            // The fake engine drops its socket on any non-text frame.
-            "engine_lost" => c.send(Message::binary(vec![0u8])).await.unwrap(),
+            // The fake engine drops its socket on a `drop` frame.
+            "engine_lost" => send(&mut c, "drop").await,
             "restart" => r.state.bump_generation(),
             _ => r.state.shutdown(),
         }
@@ -1630,4 +1634,21 @@ async fn every_subscribe_that_reaches_node_counts_as_a_node_stream() {
         c.close(None).await.unwrap();
         until(|| reg.node_streams() == 0).await;
     }
+}
+
+/// Node's decoder reads binary frames as JSON too, so a binary frame may be a subscribe.
+#[tokio::test]
+async fn a_binary_frame_holds_a_node_stream() {
+    let (_dir, files, _w) = access_env();
+    let s = access_seam(Mode::Serve, &files);
+    let reg = s.registry().clone();
+    let r = rig_with(s, ShadowLimit::default()).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    let sub = r#"{"_tag":"Request","id":1,"tag":"subscribeAuthAccess","payload":{},"headers":[]}"#;
+    c.send(Message::binary(sub.as_bytes().to_vec()))
+        .await
+        .unwrap();
+    until(|| reg.node_streams() == 1).await;
+    let _ = c.close(None).await;
+    until(|| reg.node_streams() == 0).await;
 }

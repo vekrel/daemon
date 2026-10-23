@@ -265,6 +265,10 @@ async fn pump<U>(
                 let close = m.is_close();
                 let (fwd, local) = match &m {
                     Message::Text(t) => rpc.c2s(t.as_str()),
+                    Message::Binary(_) => {
+                        rpc.c2s_binary();
+                        (Fwd::Original, Vec::new())
+                    }
                     _ => (Fwd::Original, Vec::new()),
                 };
                 let mut gone = false;
