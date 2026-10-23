@@ -242,6 +242,9 @@ pub struct Compare {
     pub ignore: &'static [&'static str],
     pub times: &'static [&'static str],
     pub headers: &'static [&'static str],
+    /// Values Node's warm in-memory caches fill in where Rust answers the cold `null`: Node set and
+    /// Rust `null` is `node_warm_enrichment` (counted, not a mismatch) when nothing else differs.
+    pub enrich: &'static [&'static str],
 }
 
 impl Compare {
@@ -249,6 +252,7 @@ impl Compare {
         ignore: &[],
         times: &[],
         headers: &["content-type"],
+        enrich: &[],
     };
     /// The headers auth routes must match: Node's credential and challenge headers.
     pub const AUTH_HEADERS: &'static [&'static str] = &[
@@ -261,6 +265,9 @@ impl Compare {
 }
 
 const SKEW_MS: i64 = 2000;
+
+/// `diff`'s field for an answer that differs only where `Compare::enrich` allows.
+pub const NODE_WARM_ENRICHMENT: &str = "node_warm_enrichment";
 
 /// The first difference between Node's response and Rust's: (field, JSON path or header name).
 pub fn diff(
@@ -297,10 +304,11 @@ pub fn diff(
     if !canonical(&a, body) || !canonical(&b, rust.body()) {
         return Some(("body", "$ (formatting)".into()));
     }
-    mask(cmp, &mut a, &mut b, "$".into());
+    let mut warm = false;
+    mask(cmp, &mut a, &mut b, "$".into(), &mut warm);
     // Byte-exact: Value equality ignores key order, and Node's order follows its schema.
     if serde_json::to_vec(&a).ok() == serde_json::to_vec(&b).ok() {
-        return None;
+        return warm.then(|| (NODE_WARM_ENRICHMENT, "$".into()));
     }
     let path = if a == b {
         "$ (key order)".into()
@@ -312,9 +320,11 @@ pub fn diff(
 
 /// Nulls the ignored values on both sides and copies Rust's timestamp onto Node's when they are
 /// within `SKEW_MS`, so `first_diff` only sees real differences. `path` uses `[*]` for indexes.
-fn mask(cmp: &Compare, a: &mut Value, b: &mut Value, path: String) {
+fn mask(cmp: &Compare, a: &mut Value, b: &mut Value, path: String, warm: &mut bool) {
     if path == "$.traceId" || cmp.ignore.contains(&path.as_str()) {
         (*a, *b) = (Value::Null, Value::Null);
+    } else if cmp.enrich.contains(&path.as_str()) && b.is_null() && !a.is_null() {
+        (*a, *warm) = (Value::Null, true);
     } else if cmp.times.contains(&path.as_str()) {
         let ms = |v: &Value| v.as_str().and_then(parse_iso);
         if let (Some(x), Some(y)) = (ms(a), ms(b))
@@ -327,13 +337,13 @@ fn mask(cmp: &Compare, a: &mut Value, b: &mut Value, path: String) {
             (Value::Object(x), Value::Object(y)) => {
                 for (k, va) in x.iter_mut() {
                     if let Some(vb) = y.get_mut(k) {
-                        mask(cmp, va, vb, format!("{path}.{k}"));
+                        mask(cmp, va, vb, format!("{path}.{k}"), warm);
                     }
                 }
             }
             (Value::Array(x), Value::Array(y)) => {
                 for (va, vb) in x.iter_mut().zip(y) {
-                    mask(cmp, va, vb, format!("{path}[*]"));
+                    mask(cmp, va, vb, format!("{path}[*]"), warm);
                 }
             }
             _ => {}
@@ -379,7 +389,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// Epoch ms of `YYYY-MM-DDTHH:MM:SS.sssZ` (`toISOString`).
-pub(crate) fn parse_iso(s: &str) -> Option<i64> {
+pub fn parse_iso(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() != 24 || b[23] != b'Z' {
         return None;
@@ -499,6 +509,9 @@ pub(crate) fn tee(
         }
         match d {
             None => tracing::info!(route, outcome = "match", "rust shadow"),
+            Some((NODE_WARM_ENRICHMENT, _)) => {
+                tracing::info!(route, outcome = NODE_WARM_ENRICHMENT, "rust shadow")
+            }
             // Expected while Node sits behind the proxy: not a Rust bug.
             Some((field, path)) if htu => {
                 tracing::info!(
@@ -785,6 +798,7 @@ mod tests {
         ignore: &["$.ticket", "$[*].sessionId"],
         times: &["$.expiresAt", "$[*].issuedAt"],
         headers: Compare::AUTH_HEADERS,
+        enrich: &[],
     };
 
     #[test]
@@ -876,6 +890,41 @@ mod tests {
             )
             .map(|x| x.0),
             Some("status")
+        );
+    }
+
+    #[test]
+    fn enrichment_paths_count_node_values_over_rust_nulls_only() {
+        const E: Compare = Compare {
+            enrich: &["$.projects[*].repositoryIdentity"],
+            ..Compare::DEFAULT
+        };
+        let ct = ("content-type", "application/json");
+        let d = |n: &str, r: &str| {
+            diff(
+                &E,
+                StatusCode::OK,
+                &hm(&[ct]),
+                n.as_bytes(),
+                &rust(200, &[ct], r),
+            )
+            .map(|(f, p)| format!("{f} {p}"))
+        };
+        let p =
+            |id: &str, x: u8| format!(r#"{{"projects":[{{"repositoryIdentity":{id},"x":{x}}}]}}"#);
+        assert_eq!(d(&p("null", 1), &p("null", 1)), None);
+        assert_eq!(
+            d(&p(r#"{"a":1}"#, 1), &p("null", 1)).as_deref(),
+            Some("node_warm_enrichment $")
+        );
+        // Anything else differing is still a mismatch, and Rust's value must equal Node's.
+        assert_eq!(
+            d(&p(r#"{"a":1}"#, 1), &p("null", 2)).as_deref(),
+            Some("body $.projects[0].x")
+        );
+        assert_eq!(
+            d(&p("null", 1), &p(r#"{"a":1}"#, 1)).as_deref(),
+            Some("body $.projects[0].repositoryIdentity")
         );
     }
 

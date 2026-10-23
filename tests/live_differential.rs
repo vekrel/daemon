@@ -3584,3 +3584,324 @@ fn thread_search_real_db_shadow_matches_node() {
     assert!(count("match") * 10 >= shadow.len() * 9, "too many declines");
     assert!(!home.exists());
 }
+
+const PROJECTS: &str = "GET /api/projects";
+const PROJECT_COLS: &str = "project_id, title, workspace_root, default_model_selection_json, \
+    default_thread_env_mode, auto_pull, favicon_path, project_icon_json, scripts_json, \
+    created_at, updated_at, deleted_at";
+
+/// Replaces the engine's `projection_projects` rows (the test's own temp DB, behind Node's back:
+/// `ProjectService.snapshot` reads the table on every request).
+fn set_projects(home: &Path, values: &str) {
+    let c = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+    c.busy_timeout(Duration::from_secs(10)).unwrap();
+    c.execute_batch("DELETE FROM projection_projects").unwrap();
+    if !values.is_empty() {
+        c.execute_batch(&format!(
+            "INSERT INTO projection_projects ({PROJECT_COLS}) VALUES {values}"
+        ))
+        .unwrap();
+    }
+}
+
+/// Shadow outcomes logged for `GET /api/projects`, by outcome.
+fn projects_outcomes(home: &Path) -> std::collections::BTreeMap<String, usize> {
+    std::thread::sleep(Duration::from_millis(300));
+    let mut m = std::collections::BTreeMap::new();
+    for l in log(home).lines() {
+        if !l.contains(&format!("route=\"{PROJECTS}\"")) {
+            continue;
+        }
+        if let Some(o) = l.split("outcome=").nth(1) {
+            let o = o.split_whitespace().next().unwrap().trim_matches('"');
+            *m.entry(o.to_owned()).or_default() += 1;
+            if !["match", "declined", "node_warm_enrichment"].contains(&o) {
+                println!("{l}");
+            }
+        }
+    }
+    m
+}
+
+/// Plan 6B Task 5: `GET /api/projects` in shadow (its default) over the engine's cwd project, the
+/// golden rows (Node's body is the golden), rows Rust must decline, a git workspace Node enriches,
+/// and with `VEKREL_REAL_DB` the owner's real project rows. Every compared answer matches.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn projects_shadow_matches_node() {
+    let Some((d, base, home, token)) = start_with("projects", |home, cmd| {
+        cmd.current_dir(home);
+    }) else {
+        return;
+    };
+    let ck = pair(&base, &home, &token);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let url = format!("{base}/api/projects");
+    let fetch = |ae: Option<&str>| {
+        let mut h = vec![("cookie", ck.as_str())];
+        if let Some(ae) = ae {
+            h.push(("accept-encoding", ae));
+        }
+        let (s, nh, nb) = rt.block_on(raw_get(&http, &url, &h));
+        assert_eq!(s, 200);
+        assert!(
+            nh.get("x-vekrel-served-by").is_none(),
+            "shadow: Node answers"
+        );
+        let plain = vekrel::http_seam::decoded(nh.get("content-encoding"), nb.into()).unwrap();
+        String::from_utf8(plain.to_vec()).unwrap()
+    };
+    let round = || {
+        for ae in [None, Some("gzip"), Some("br"), Some("gzip, deflate, br")] {
+            fetch(ae);
+        }
+    };
+    round();
+
+    // The golden rows: Node's body, `updatedAt` pinned, is the golden Rust's unit test renders.
+    set_projects(&home, include_str!("golden/projects_rows.sql"));
+    let node = fetch(None);
+    let mut v: serde_json::Value = serde_json::from_str(&node).unwrap();
+    v["updatedAt"] = "2030-01-01T00:00:00.123Z".into();
+    let pinned = serde_json::to_string(&v).unwrap();
+    println!("NODE_GOLDEN={pinned}");
+    assert_eq!(
+        pinned,
+        include_str!("golden/projects.json").trim_end(),
+        "Node's body for the golden rows"
+    );
+    round();
+    let after_golden = projects_outcomes(&home);
+
+    // Rows Node reshapes (trims) or rejects (500): Rust declines each.
+    let declines = [
+        "('p', ' padded', '/w', NULL, NULL, 0, NULL, NULL, '[]', 'c', 'u', NULL)",
+        r#"('p', 'T', '/w', '{"provider":"codex","model":"m"}', NULL, 0, NULL, NULL, '[]', 'c', 'u', NULL)"#,
+        r#"('p', 'T', '/w', NULL, NULL, 0, NULL, '{"kind":"lucide","name":"a","color":"red","monogramText":"AB"}', '[]', 'c', 'u', NULL)"#,
+        "('p', 'T', '/w', NULL, NULL, 2, NULL, NULL, '[]', 'c', 'u', NULL)",
+    ];
+    let before = projects_outcomes(&home)
+        .get("declined")
+        .copied()
+        .unwrap_or(0);
+    for row in declines {
+        set_projects(&home, row);
+        let (s, _, _) = rt.block_on(raw_get(&http, &url, &[("cookie", ck.as_str())]));
+        println!("Node answers {s} for {row}");
+    }
+    let after = projects_outcomes(&home)
+        .get("declined")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(after - before, declines.len(), "each row declines");
+
+    // A git workspace: once Node's enrichment cache is warm, its repositoryIdentity is counted.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    set_projects(
+        &home,
+        &format!("('git', 'Daemon', '{repo}', NULL, NULL, 0, NULL, NULL, '[]', 'c', 'u', NULL)"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let v: serde_json::Value = serde_json::from_str(&fetch(None)).unwrap();
+        if !v["projects"][0]["repositoryIdentity"].is_null() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Node never enriched the repo");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let warm = projects_outcomes(&home);
+    assert!(
+        warm.get("node_warm_enrichment").copied().unwrap_or(0) >= 1,
+        "{warm:?}"
+    );
+
+    // The owner's real projects (rows only, from the local copy; nothing is written to the repo).
+    if let Some(copy) = support::real_db::real_db() {
+        let src = home.join("userdata/statev2.sqlite");
+        let live = rusqlite::Connection::open(&src).unwrap();
+        live.busy_timeout(Duration::from_secs(10)).unwrap();
+        let ro = format!("file:{}?mode=ro", copy.display());
+        live.execute("ATTACH ?1 AS real", [ro]).unwrap();
+        live.execute_batch(&format!(
+            "DELETE FROM projection_projects; INSERT INTO projection_projects ({PROJECT_COLS}) \
+             SELECT {PROJECT_COLS} FROM real.projection_projects; DETACH real;"
+        ))
+        .unwrap();
+        let n: i64 = live
+            .query_row(
+                "SELECT count(*) FROM projection_projects WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(live);
+        let before = projects_outcomes(&home);
+        for _ in 0..3 {
+            round();
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let after = projects_outcomes(&home);
+        let delta =
+            |k: &str| after.get(k).copied().unwrap_or(0) - before.get(k).copied().unwrap_or(0);
+        println!(
+            "owner DB: {n} live projects; match {}, node_warm_enrichment {}, declined {}",
+            delta("match"),
+            delta("node_warm_enrichment"),
+            delta("declined")
+        );
+        assert_eq!(delta("declined"), 0, "Rust serves every real row");
+        assert_eq!(delta("match") + delta("node_warm_enrichment"), 12);
+    }
+
+    let all = projects_outcomes(&home);
+    println!("GET /api/projects shadow outcomes: {all:?} (after golden: {after_golden:?})");
+    let compared = all.get("match").copied().unwrap_or(0)
+        + all.get("node_warm_enrichment").copied().unwrap_or(0);
+    let other: usize = all
+        .iter()
+        .filter(|(k, _)| !["match", "declined", "node_warm_enrichment"].contains(&k.as_str()))
+        .map(|(_, n)| n)
+        .sum();
+    assert_eq!(other, 0, "no mismatch or skipped comparison: {all:?}");
+    assert!(
+        after_golden.get("match").copied().unwrap_or(0) >= 9,
+        "{after_golden:?}"
+    );
+    assert!(compared >= 10);
+    drop(d);
+    assert!(!home.exists());
+}
+
+/// Plan 6B Task 5 in `serve`: Rust answers `GET /api/projects` with Node's status, header set,
+/// `content-encoding`, `vary` and length for every `accept-encoding`, below and above Effect's
+/// 1 KiB threshold; the decoded body is Node's (direct from the engine) with `updatedAt` within
+/// 2 s and enrichment masked; Node's 401 without a credential; and the DB is unchanged.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn projects_served_matches_node_compression_and_writes_nothing() {
+    let Some((d, base, home, token)) = start_with("projects-serve", |home, cmd| {
+        cmd.current_dir(home);
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(&cfg, t + &format!("\"{PROJECTS}\" = \"serve\"\n")).unwrap();
+    }) else {
+        return;
+    };
+    let ck = pair(&base, &home, &token);
+    let engine = engine_base(&home);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let accepts: [Option<&str>; 12] = [
+        None,
+        Some(""),
+        Some("gzip"),
+        Some("br"),
+        Some("deflate"),
+        Some("gzip, br"),
+        Some("gzip, deflate, br, zstd"),
+        Some("br;q=0, gzip"),
+        Some("identity"),
+        Some("*"),
+        Some("*;q=0"),
+        Some("zstd"),
+    ];
+    let names = |m: &reqwest::header::HeaderMap| {
+        let mut v: Vec<String> = m
+            .keys()
+            .map(|k| k.to_string())
+            .filter(|k| {
+                !["date", "connection", "keep-alive", "x-vekrel-served-by"].contains(&k.as_str())
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let masked = |b: &[u8]| {
+        let mut v: serde_json::Value = serde_json::from_slice(b).unwrap();
+        let ms = |s: &serde_json::Value| s.as_str().map(|s| s.to_owned());
+        let t = ms(&v["updatedAt"]).unwrap();
+        v["updatedAt"] = "T".into();
+        for p in v["projects"].as_array_mut().unwrap() {
+            p["repositoryIdentity"] = serde_json::Value::Null;
+        }
+        (v.to_string(), t)
+    };
+    let mut identical = std::collections::BTreeMap::<String, (usize, usize)>::new();
+    let mut matrix = |label: &str| {
+        for ae in accepts {
+            let mut h = vec![("cookie", ck.as_str())];
+            if let Some(ae) = ae {
+                h.push(("accept-encoding", ae));
+            }
+            let what = format!("{label}, accept-encoding {ae:?}");
+            let (rs, rh, rb) = rt.block_on(raw_get(&http, &format!("{base}/api/projects"), &h));
+            let (ns, nh, nb) = rt.block_on(raw_get(&http, &format!("{engine}/api/projects"), &h));
+            assert_eq!(
+                rh.get("x-vekrel-served-by").map(|v| v.to_str().unwrap()),
+                Some("rust"),
+                "{what}"
+            );
+            assert_eq!((rs, ns), (200, 200), "{what}");
+            for k in [
+                "content-encoding",
+                "vary",
+                "content-type",
+                "access-control-allow-origin",
+            ] {
+                assert_eq!(rh.get(k), nh.get(k), "{what}: {k}");
+            }
+            assert_eq!(names(&rh), names(&nh), "{what}");
+            assert_eq!(rh["content-length"], rb.len().to_string(), "{what}");
+            let enc = nh.get("content-encoding");
+            let rd = vekrel::http_seam::decoded(enc, rb.clone().into()).unwrap();
+            let nd = vekrel::http_seam::decoded(enc, nb.clone().into()).unwrap();
+            let ((r, rt_), (n, nt)) = (masked(&rd), masked(&nd));
+            assert_eq!(r, n, "{what}");
+            let ms = |s: &str| vekrel::http_seam::parse_iso(s).unwrap();
+            assert!((ms(&rt_) - ms(&nt)).abs() <= 2000, "{what}: {rt_} vs {nt}");
+            if let Some(e) = enc {
+                let t = identical.entry(e.to_str().unwrap().to_owned()).or_default();
+                t.1 += 1;
+                t.0 += usize::from(rb == nb);
+            }
+        }
+        println!("{label}: {} accept-encodings agree", accepts.len());
+    };
+    let tables = || {
+        let c = rusqlite::Connection::open_with_flags(
+            home.join("userdata/statev2.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        // Only the rows the test itself replaces may differ.
+        let mut t = data_tables(&c);
+        t.retain(|(name, _)| name != "projection_projects");
+        t
+    };
+    let before = tables();
+    matrix("the cwd project (under 1 KiB)");
+    set_projects(&home, include_str!("golden/projects_rows.sql"));
+    matrix("the golden rows (over 1 KiB)");
+    for (e, (same, all)) in &identical {
+        println!("compressed bytes identical to Node's: {e} {same}/{all}");
+    }
+
+    // Node's 401 without a credential, from Rust.
+    let (rs, rh, rb) = rt.block_on(raw_get(&http, &format!("{base}/api/projects"), &[]));
+    let (ns, _, nb) = rt.block_on(raw_get(&http, &format!("{engine}/api/projects"), &[]));
+    assert_eq!((rs, ns), (401, 401));
+    assert!(rh.get("x-vekrel-served-by").is_some());
+    let trace = |b: &[u8]| {
+        let mut v: serde_json::Value = serde_json::from_slice(b).unwrap();
+        v["traceId"] = "T".into();
+        v.to_string()
+    };
+    assert_eq!(trace(&rb), trace(&nb));
+
+    // Rust wrote nothing: only the rows the test itself replaced differ.
+    assert_eq!(tables(), before, "orchestration tables unchanged");
+    drop(d);
+    assert!(!home.exists());
+}

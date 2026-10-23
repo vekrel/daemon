@@ -208,6 +208,7 @@ impl RouteHandler for CreatePairingToken {
             ignore: &["$.id", "$.credential"],
             times: &["$.expiresAt"],
             headers: Compare::AUTH_HEADERS,
+            enrich: &[],
         }
     }
 

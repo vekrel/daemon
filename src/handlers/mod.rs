@@ -7,6 +7,7 @@ pub mod clients;
 pub mod machine_descriptor;
 pub mod pairing;
 pub mod pairing_links;
+pub mod projects;
 pub mod read_file;
 pub mod thread_search;
 pub mod ws_ticket;

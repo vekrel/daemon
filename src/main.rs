@@ -5,7 +5,7 @@ use vekrel::{
     config,
     handlers::{
         self, HandlerCtx, auth_access, auth_session, browse, clients, machine_descriptor, pairing,
-        pairing_links, read_file, thread_search, ws_ticket,
+        pairing_links, projects, read_file, thread_search, ws_ticket,
     },
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     access: access.clone(),
                     serve: route_mode(key, config::Mode::Serve) == config::Mode::Serve,
                 };
-                let routes: [Arc<dyn RouteHandler>; 10] = [
+                let routes: [Arc<dyn RouteHandler>; 11] = [
                     auth.clone(),
                     Arc::new(ws_ticket::WsTicket(auth.clone())),
                     Arc::new(pairing_links::CreatePairingToken(writer(
@@ -131,6 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Arc::new(clients::RevokeOtherClients(writer(
                         clients::REVOKE_OTHERS_KEY,
                     ))),
+                    Arc::new(projects::Projects {
+                        auth: auth.clone(),
+                        db: Arc::new(vekrel::db::read::StateDb::new(userdata)),
+                    }),
                 ];
                 for h in routes {
                     let key = http_seam::key(&*h);
