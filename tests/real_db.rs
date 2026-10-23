@@ -118,3 +118,79 @@ fn owner_db_copy_passes_the_schema_gate() {
     println!("owner DB copy: {threads} threads, {projects} projects");
     assert!(threads > 0);
 }
+
+/// SHA-256 of `path` (streamed: the copy is about 2 GB).
+fn digest(path: &Path) -> Option<Vec<u8>> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let (mut h, mut buf) = (sha2::Sha256::new(), vec![0; 1 << 20]);
+    loop {
+        match f.read(&mut buf).unwrap() {
+            0 => return Some(h.finalize().to_vec()),
+            n => h.update(&buf[..n]),
+        }
+    }
+}
+
+/// Every turn item of the owner's DB through Rust's `getTurnItem` (what serve would answer):
+/// every legacy thread's item declines before its row is read, and the copy (and its WAL) is
+/// byte-identical afterwards.
+#[test]
+fn owner_db_turn_items_decline_legacy_threads_and_write_nothing() {
+    use vekrel::handlers::turn_item::get_turn_item;
+    let Some(path) = real_db() else {
+        return;
+    };
+    let files = ["", "-wal"].map(|s| path.with_file_name(format!("statev2.sqlite{s}")));
+    // Opened first: a read-only open creates the empty `-wal` / `-shm` sidecars.
+    let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    c.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .unwrap();
+    let before: Vec<_> = files.iter().map(|f| digest(f)).collect();
+    let rows: Vec<(String, String, bool)> = c
+        .prepare(
+            "SELECT thread_id, turn_item_id, thread_id IN \
+             (SELECT thread_id FROM orchestration_v2_legacy_imports) \
+             FROM orchestration_v2_projection_turn_items",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    drop(c);
+    let db = StateDb::new(path.parent().unwrap());
+    let mut outcomes = std::collections::BTreeMap::<&str, usize>::new();
+    let (mut legacy, mut legacy_declined) = (0, 0);
+    for (t, i, is_legacy) in &rows {
+        let r = get_turn_item(&db, &serde_json::json!({"threadId": t, "itemId": i}));
+        let o = match &r {
+            Ok(v) => {
+                assert!(!v["item"].is_null(), "{i}: listed row read as missing");
+                "served"
+            }
+            Err(why) => why,
+        };
+        *outcomes.entry(o).or_default() += 1;
+        if *is_legacy {
+            legacy += 1;
+            legacy_declined += usize::from(o == "legacy_thread");
+        }
+    }
+    println!(
+        "owner DB getTurnItem over {} items: {outcomes:?}",
+        rows.len()
+    );
+    assert_eq!(
+        legacy_declined, legacy,
+        "every legacy thread's item declined"
+    );
+    assert_eq!(outcomes.get("legacy_thread").copied().unwrap_or(0), legacy);
+    assert!(outcomes.get("served").copied().unwrap_or(0) > 0);
+    let after: Vec<_> = files.iter().map(|f| digest(f)).collect();
+    assert_eq!(before, after, "the copy is byte-identical after the run");
+}

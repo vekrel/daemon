@@ -4167,3 +4167,385 @@ fn shell_builder_matches_node_on_owner_db() {
     drop(d);
     assert!(!home.exists());
 }
+
+/// `orchestration.getTurnItem` requests, one at a time on one socket: each Exit's raw `exit` JSON.
+/// Shadow (`home` set): after each Exit, waits until Rust's outcome for it is logged, so Rust's
+/// slower reads are neither cut off by the socket closing nor skipped by the shadow limiter.
+fn turn_item_exits(
+    base: &str,
+    cookie: &str,
+    payloads: &[serde_json::Value],
+    home: Option<&Path>,
+) -> Vec<String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    #[derive(serde::Deserialize)]
+    struct Msg {
+        #[serde(rename = "_tag")]
+        tag: String,
+        #[serde(rename = "requestId")]
+        request_id: Option<serde_json::Value>,
+        exit: Option<Box<serde_json::value::RawValue>>,
+    }
+    let ws = base.replace("http://", "ws://") + "/ws?orchestrationProtocol=2";
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut req = ws.into_client_request().unwrap();
+        let h = req.headers_mut();
+        h.insert("cookie", cookie.parse().unwrap());
+        h.insert("origin", base.parse().unwrap());
+        let (mut c, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+        let mut exits = Vec::new();
+        let logged = home.map_or(0, outcome_count);
+        for (id, payload) in payloads.iter().enumerate() {
+            let r = serde_json::json!({"_tag":"Request","id":id.to_string(),
+                "tag":"orchestration.getTurnItem","payload":payload,
+                "traceId":"0123456789abcdef0123456789abcdef","spanId":"0123456789abcdef",
+                "sampled":true,"headers":[]});
+            c.send(Message::text(r.to_string())).await.unwrap();
+            loop {
+                let m = tokio::time::timeout(Duration::from_secs(30), c.next())
+                    .await
+                    .expect("reply")
+                    .unwrap()
+                    .unwrap();
+                let Message::Text(t) = m else { continue };
+                let msgs: Vec<Msg> = if t.trim_start().starts_with('[') {
+                    serde_json::from_str(t.as_str()).unwrap()
+                } else {
+                    vec![serde_json::from_str(t.as_str()).unwrap()]
+                };
+                let rid = |m: &Msg| {
+                    m.request_id.as_ref().map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        v => v.to_string(),
+                    })
+                };
+                let hit = msgs
+                    .into_iter()
+                    .find(|m| m.tag == "Exit" && rid(m) == Some(id.to_string()));
+                if let Some(m) = hit {
+                    exits.push(m.exit.unwrap().get().to_owned());
+                    break;
+                }
+            }
+            if let Some(home) = home {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while outcome_count(home) < logged + id + 1 && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+        exits
+    })
+}
+
+/// (match, mismatch, declines by reason) among this run's getTurnItem log lines; prints
+/// mismatching lines (paths only).
+/// Waits (load-tolerant, up to 60 s) until `expect` requests have an outcome logged.
+fn turn_item_outcomes(
+    home: &Path,
+    expect: usize,
+) -> (usize, usize, std::collections::BTreeMap<String, usize>) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let r = turn_item_outcomes_now(home);
+        if r.0 + r.1 + r.2.values().sum::<usize>() >= expect || Instant::now() > deadline {
+            return r;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn outcome_count(home: &Path) -> usize {
+    let r = turn_item_outcomes_now(home);
+    r.0 + r.1 + r.2.values().sum::<usize>()
+}
+
+fn turn_item_outcomes_now(
+    home: &Path,
+) -> (usize, usize, std::collections::BTreeMap<String, usize>) {
+    let l = log(home);
+    let tag = "tag=\"orchestration.getTurnItem\"";
+    let lines: Vec<&str> = l.lines().filter(|l| l.contains(tag)).collect();
+    let count = |o: &str| {
+        lines
+            .iter()
+            .filter(|l| l.contains("rust shadow") && l.contains(&format!("outcome=\"{o}\"")))
+            .count()
+    };
+    let mut reasons = std::collections::BTreeMap::new();
+    for l in lines.iter().filter(|l| l.contains("turn item declined")) {
+        let r = l
+            .split("reason=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        *reasons.entry(r.to_owned()).or_insert(0) += 1;
+    }
+    (count("match"), count("mismatch"), reasons)
+}
+
+fn print_mismatches(home: &Path) {
+    let l = log(home);
+    let tag = "tag=\"orchestration.getTurnItem\"";
+    for m in l
+        .lines()
+        .filter(|l| l.contains(tag) && l.contains("\"mismatch\""))
+    {
+        println!("{m}");
+    }
+}
+
+/// Every row of every `orchestration*` / `projection*` table, as text.
+fn dump_orchestration(db: &Path) -> Vec<String> {
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    c.busy_timeout(Duration::from_secs(5)).unwrap();
+    let tables: Vec<String> = c
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND (name LIKE 'orchestration%' OR name LIKE 'projection%') ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let mut out = Vec::new();
+    for t in tables {
+        let mut q = c
+            .prepare(&format!("SELECT * FROM \"{t}\" ORDER BY rowid"))
+            .unwrap();
+        let n = q.column_count();
+        let rows = q
+            .query_map([], |r| {
+                (0..n)
+                    .map(|i| {
+                        r.get::<_, rusqlite::types::Value>(i)
+                            .map(|v| format!("{v:?}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        for row in rows {
+            out.push(format!("{t}: {}", row.unwrap().join(", ")));
+        }
+    }
+    out
+}
+
+/// The fixture items (`tests/fixtures/turn_items.json`) plus a pending legacy thread, written
+/// into the engine's own DB, then: shadow (Node answers, Rust compares) or serve (Rust answers
+/// what it can). Returns the Exits and the decline reasons; serve also checks that the
+/// Rust-served requests left every orchestration table unchanged.
+fn turn_item_run(mode: &str) -> Option<(Vec<String>, std::collections::BTreeMap<String, usize>)> {
+    let (d, base, home, token) = start_with(&format!("turn-item-{mode}"), |h, _| {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(h.join("vekrel.toml"))
+            .unwrap();
+        writeln!(f, "\"orchestration.getTurnItem\" = \"{mode}\"").unwrap();
+    })?;
+    let cookie = pair(&base, &home, &token);
+    let db_path = home.join("userdata/statev2.sqlite");
+    let fixture: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/turn_items.json")).unwrap();
+    {
+        let c = rusqlite::Connection::open(&db_path).unwrap();
+        c.busy_timeout(Duration::from_secs(10)).unwrap();
+        let put = |thread: &str, item: &serde_json::Value| {
+            c.execute(
+                "INSERT INTO orchestration_v2_projection_turn_items VALUES \
+                 (?1, ?2, NULL, NULL, NULL, NULL, NULL, 0, ?3, 'completed', ?4, ?5)",
+                rusqlite::params![
+                    item["id"].as_str().unwrap(),
+                    thread,
+                    item["type"].as_str().unwrap(),
+                    "2026-10-23T01:02:06.000Z",
+                    item.to_string()
+                ],
+            )
+            .unwrap();
+        };
+        for e in &fixture {
+            put("thread-a", &e["item"]);
+        }
+        let mut legacy = fixture[0]["item"].clone();
+        legacy["id"] = "ti-legacy".into();
+        legacy["threadId"] = "thread-legacy".into();
+        put("thread-legacy", &legacy);
+        c.execute(
+            "INSERT INTO orchestration_v2_legacy_imports VALUES \
+             ('thread-legacy', '2026-10-23T00:00:00.000Z', '2026-10-23T00:00:00.000Z', NULL, 0, NULL)",
+            [],
+        )
+        .unwrap();
+    }
+    let req = |t: &str, i: &str| serde_json::json!({"threadId": t, "itemId": i});
+    let mut payloads: Vec<serde_json::Value> = fixture
+        .iter()
+        .map(|e| req("thread-a", e["item"]["id"].as_str().unwrap()))
+        .collect();
+    payloads.extend([
+        req("thread-a", "missing"),
+        req("thread-nowhere", "ti-cmd"),
+        serde_json::json!({"threadId": "thread-a", "itemId": "ti-cmd", "revision": "rev-1"}),
+        serde_json::json!({"threadId": " thread-a ", "itemId": "ti-cmd"}),
+        serde_json::json!({"threadId": "thread-a", "itemId": "ti-cmd", "extra": true}),
+    ]);
+    let before = dump_orchestration(&db_path);
+    let shadow = (mode == "shadow").then_some(home.as_path());
+    let mut exits = turn_item_exits(&base, &cookie, &payloads, shadow);
+    if mode == "serve" {
+        // Rust served or declined every request above; Node answered the declined ones but
+        // none of them reaches a legacy thread, so nothing may have been written.
+        assert_eq!(
+            dump_orchestration(&db_path),
+            before,
+            "Rust-served run wrote the DB"
+        );
+    }
+    let pending = |db: &Path| -> bool {
+        let c =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        c.query_row(
+            "SELECT transcript_imported_at IS NULL FROM orchestration_v2_legacy_imports \
+             WHERE thread_id = 'thread-legacy'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        pending(&db_path),
+        "legacy import still pending before its first read"
+    );
+    // Rust declines both; Node imports on the first (a write only Node makes).
+    exits.extend(turn_item_exits(
+        &base,
+        &cookie,
+        &[
+            req("thread-legacy", "ti-legacy"),
+            req("thread-legacy", "ti-legacy"),
+        ],
+        shadow,
+    ));
+    assert!(!pending(&db_path), "Node imported the legacy transcript");
+    let served = fixture.iter().filter(|e| e["served"] == true).count() + 3;
+    let expect = if mode == "shadow" {
+        payloads.len() + 2
+    } else {
+        payloads.len() + 2 - served
+    };
+    let (matches, mismatches, reasons) = turn_item_outcomes(&home, expect);
+    println!("getTurnItem {mode}: {matches} match, {mismatches} mismatch, declined {reasons:?}");
+    print_mismatches(&home);
+    assert_eq!(mismatches, 0);
+    let declined = payloads.len() + 2 - served;
+    assert_eq!(reasons.values().sum::<usize>(), declined, "{reasons:?}");
+    assert_eq!(reasons.get("legacy_thread"), Some(&2));
+    assert_eq!(reasons.get("payload"), Some(&2));
+    if mode == "shadow" {
+        assert_eq!(matches, served, "every answerable request compared");
+    }
+    drop(d);
+    assert!(!home.exists());
+    Some((exits, reasons))
+}
+
+/// Synthetic rows of every ported type: shadow logs only matches; serve sends Node's exact
+/// bytes, writes nothing, and leaves legacy threads (and Node's import) to Node.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn turn_item_shadow_matches_node_and_serve_sends_its_bytes() {
+    let Some((node, shadow_reasons)) = turn_item_run("shadow") else {
+        return;
+    };
+    let (rust, serve_reasons) = turn_item_run("serve").unwrap();
+    assert_eq!(shadow_reasons, serve_reasons);
+    for (i, (n, r)) in node.iter().zip(&rust).enumerate() {
+        assert_eq!(n, r, "request {i}: served bytes differ from Node's");
+    }
+    assert_eq!(node.len(), rust.len());
+    assert!(node.iter().any(|e| e.contains(r#""item":null"#)));
+}
+
+/// `VEKREL_REAL_DB`: turn items sampled across the owner's DB, every legacy thread included,
+/// through the engine running on a copy. Rust's answers match Node's, and every legacy thread
+/// declines.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs> and VEKREL_REAL_DB"]
+fn turn_item_real_db_shadow_matches_node() {
+    if std::env::var_os("VEKREL_REAL_DB").is_none() {
+        eprintln!("VEKREL_REAL_DB unset; skipping");
+        return;
+    }
+    let mut payloads = Vec::new();
+    let mut legacy = 0;
+    let Some((d, base, home, token)) = start_with("turn-item-real", |h, _| {
+        let (dir, copy) = support::real_db::copy_from(std::env::var_os("VEKREL_REAL_DB")).unwrap();
+        std::fs::create_dir_all(h.join("userdata")).unwrap();
+        let dest = h.join("userdata/statev2.sqlite");
+        std::fs::rename(&copy, &dest).unwrap();
+        drop(dir);
+        let c = rusqlite::Connection::open_with_flags(
+            &dest,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let rows = |sql: &str| -> Vec<(String, String)> {
+            c.prepare(sql)
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let not_legacy = "thread_id NOT IN (SELECT thread_id FROM orchestration_v2_legacy_imports)";
+        let types = rows(&format!(
+            "SELECT DISTINCT type, '' FROM orchestration_v2_projection_turn_items WHERE {not_legacy}"
+        ));
+        let mut sample = Vec::new();
+        for (ty, _) in types {
+            // Spread over the table by id suffix; plus each type's largest rows.
+            for order in ["substr(turn_item_id, -5)", "length(payload_json) DESC"] {
+                sample.extend(rows(&format!(
+                    "SELECT thread_id, turn_item_id FROM orchestration_v2_projection_turn_items \
+                     WHERE type = '{ty}' AND {not_legacy} ORDER BY {order} LIMIT 25"
+                )));
+            }
+        }
+        let l = rows(
+            "SELECT l.thread_id, coalesce((SELECT turn_item_id FROM orchestration_v2_projection_turn_items t \
+             WHERE t.thread_id = l.thread_id ORDER BY ordinal LIMIT 1), 'missing') \
+             FROM orchestration_v2_legacy_imports l",
+        );
+        legacy = l.len();
+        sample.sort();
+        sample.dedup();
+        for (t, i) in sample.iter().chain(&l) {
+            payloads.push(serde_json::json!({"threadId": t, "itemId": i, "revision": "r"}));
+        }
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let exits = turn_item_exits(&base, &cookie, &payloads, Some(&home));
+    assert_eq!(exits.len(), payloads.len());
+    let (matches, mismatches, reasons) = turn_item_outcomes(&home, payloads.len());
+    println!(
+        "getTurnItem owner DB: {} requests ({legacy} legacy threads): {matches} match, {mismatches} mismatch, declined {reasons:?}",
+        payloads.len()
+    );
+    print_mismatches(&home);
+    assert_eq!(mismatches, 0);
+    assert_eq!(reasons.get("legacy_thread").copied().unwrap_or(0), legacy);
+    assert_eq!(matches + reasons.values().sum::<usize>(), payloads.len());
+    drop(d);
+    assert!(!home.exists());
+}

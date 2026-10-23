@@ -5,7 +5,7 @@ use vekrel::{
     config,
     handlers::{
         self, HandlerCtx, auth_access, auth_session, browse, clients, machine_descriptor, pairing,
-        pairing_links, projects, read_file, thread_search, ws_ticket,
+        pairing_links, projects, read_file, thread_search, turn_item, ws_ticket,
     },
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(read_file::ReadFile),
         Arc::new(browse::Browse::from_env()),
         Arc::new(thread_search::SearchThreads::default()),
+        Arc::new(turn_item::TurnItem::default()),
     ];
     let mut rpc = rpc_seam::Seam::from_config(ws_handlers, &cfg.rust)
         .with_dpop_mode(cfg.rust.mode("GET /ws dpop", config::Mode::Serve));
