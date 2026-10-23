@@ -168,7 +168,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let engine = tokio::spawn(supervisor::run(cfg.engine, engine_port, state.clone()));
+    let engine = tokio::spawn(supervisor::run(
+        cfg.engine,
+        engine_port,
+        cfg.server.port,
+        state.clone(),
+    ));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.server.port)).await?;
     let mut app = server::build_with_tap(
         state.clone(),

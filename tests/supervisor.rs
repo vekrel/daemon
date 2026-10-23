@@ -188,7 +188,7 @@ async fn child_receives_vekrel_port_env() {
     let dir = tempfile::tempdir().unwrap();
     let (a, b) = (dir.path().join("port"), dir.path().join("rest"));
     let script = format!(
-        "echo $VEKREL_PORT > {}; echo $VEKREL_HOST $VEKREL_NO_BROWSER $LC_ALL $LC_MESSAGES $LANG > {}; sleep 30",
+        "echo $VEKREL_PORT > {}; echo $VEKREL_HOST $VEKREL_NO_BROWSER $VEKREL_ADVERTISED_ORIGIN $LC_ALL $LC_MESSAGES $LANG > {}; sleep 30",
         a.display(),
         b.display()
     );
@@ -205,7 +205,7 @@ async fn child_receives_vekrel_port_env() {
     );
     assert_eq!(
         std::fs::read_to_string(b).unwrap().trim(),
-        "127.0.0.1 1 en-u-kn-true sv_SE.UTF-8 de_DE.UTF-8"
+        format!("127.0.0.1 1 http://127.0.0.1:{port} en-u-kn-true sv_SE.UTF-8 de_DE.UTF-8")
     );
 }
 

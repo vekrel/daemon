@@ -41,7 +41,7 @@ pub fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_secs(1u64 << attempt.min(5)).min(Duration::from_secs(30))
 }
 
-pub async fn run(cfg: EngineConfig, port: u16, state: Arc<State>) {
+pub async fn run(cfg: EngineConfig, port: u16, public_port: u16, state: Arc<State>) {
     // attempt drives backoff and resets after 60s up; restarts only ever grows.
     let mut attempt: u32 = 0;
     let mut shutdown = state.shutdown_tx.subscribe();
@@ -53,6 +53,11 @@ pub async fn run(cfg: EngineConfig, port: u16, state: Arc<State>) {
             .env("VEKREL_PORT", port.to_string())
             .env("VEKREL_HOST", "127.0.0.1")
             .env("VEKREL_NO_BROWSER", "1")
+            // The engine prints its pairing URL and QR with this origin (the daemon's), not its own.
+            .env(
+                "VEKREL_ADVERTISED_ORIGIN",
+                format!("http://127.0.0.1:{public_port}"),
+            )
             .kill_on_drop(true)
             .spawn();
         match spawned {

@@ -67,7 +67,7 @@ scripts/smoke.sh ../Vekrel-Engine ../Vekrel-Web   # or ENGINE_DIR=... WEB_DIR=..
 
 The script copies `Vekrel-Web/apps/web/dist` into the engine, starts `vekrel serve --record` with a temporary `VEKREL_HOME`, checks `/healthz` and `/.well-known/vekrel/machine` through the public port, pairs with the engine's token and asserts that `/.well-known/vekrel/machine` and `/api/auth/session` (with the paired cookie) carry `x-vekrel-served-by: rust`, then stops the daemon and deletes the temporary state.
 
-For a browser session, run `vekrel serve` yourself with a config like the one in the script. The engine logs a pairing URL with its own loopback port (`public + 10`). Replace that port with the public port before you open it so the browser goes through the proxy. Clients must reach the engine through the daemon: a direct engine-port connection is invisible to Rust (no Rust stream events, not `connected`, and a Rust revoke closes it only on Node's 5 s row re-check). With `--record`, frames are written to `$VEKREL_HOME/recordings/`. Those files contain session tokens, so never commit them.
+For a browser session, run `vekrel serve` yourself with a config like the one in the script. The daemon sets `VEKREL_ADVERTISED_ORIGIN` to its public origin, so the pairing URL and QR the engine prints already use the public port. Clients must reach the engine through the daemon: a direct engine-port connection is invisible to Rust (no Rust stream events, not `connected`, and a Rust revoke closes it only on Node's 5 s row re-check). With `--record`, frames are written to `$VEKREL_HOME/recordings/`. Those files contain session tokens, so never commit them.
 
 ## Shadow auth
 
