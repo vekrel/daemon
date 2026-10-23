@@ -26,13 +26,16 @@ use std::collections::{HashMap, HashSet};
 pub enum Decline {
     /// The read itself (busy, SQL error, schema gate).
     Read(read::Decline),
-    /// A payload or column that does not decode as Effect decodes it (schema drift, or a value
-    /// Node would reject). `path` names the field, never its value.
+    /// A payload Effect rejects (schema drift): Node's snapshot fails there. `path` names the
+    /// field, never its value.
     PayloadDrift { thread_id: String, path: String },
+    /// A value the port cannot judge (a non-canonical date, JSON text serde does not parse):
+    /// Effect may accept it.
+    DecodeLimit { thread_id: String, path: String },
     /// A turn item of a type the shell decoder does not port.
     ItemKindNotPorted { thread_id: String, kind: String },
     /// A branch of the TypeScript not ported (a legacy single linked PR, a PR watch task, an MCP
-    /// tool name).
+    /// tool name, rows whose order SQL leaves open).
     NotPorted {
         thread_id: String,
         what: &'static str,
@@ -44,6 +47,7 @@ impl Decline {
         match self {
             Decline::Read(r) => r.reason(),
             Decline::PayloadDrift { .. } => "payload_drift",
+            Decline::DecodeLimit { .. } => "decode_limit",
             Decline::ItemKindNotPorted { .. } => "item_kind_not_ported",
             Decline::NotPorted { .. } => "not_ported",
         }

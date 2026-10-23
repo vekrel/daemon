@@ -4056,7 +4056,7 @@ fn shell_builder_matches_node_on_fixtures() {
             Location::Archive => compared.1 = fx,
         }
     }
-    assert_eq!(compared, (30, 4), "every scenario reached both");
+    assert_eq!(compared, (34, 4), "every scenario reached both");
 
     // A payload Effect rejects: Node's snapshot fails (500), Rust declines with the path.
     let mut drift = fixture::Fx::default();
@@ -4073,6 +4073,31 @@ fn shell_builder_matches_node_on_fixtures() {
         })
     );
     write("DELETE FROM orchestration_v2_projection_threads WHERE thread_id = 'fx-drift';");
+    // An icon Effect rejects on the presented run's terminal failure: Node 500, Rust declines.
+    let mut icon = fixture::Fx::default();
+    icon.thread("fx-bad-icon", 41, serde_json::json!({}))
+        .run("fx-bad-icon", 1, "failed", serde_json::json!({}))
+        .item(
+            "fx-bad-icon",
+            "fx-bad-icon-e",
+            Some(1),
+            "error",
+            "failed",
+            serde_json::json!({
+            "nodeId": "fx-bad-icon:run:1:root", "toolIcon": {"_tag": "website"},
+            "failure": {"class": "unknown", "message": "m", "code": null, "retryable": null}}),
+        );
+    write(&icon.0);
+    let (code, _, _, body) = node_shell(&home, &cookie);
+    assert_eq!(code, 500, "{body}");
+    assert_eq!(
+        rust_shell(&home, Location::Active).1,
+        Err(Decline::PayloadDrift {
+            thread_id: "fx-bad-icon".into(),
+            path: "terminalFailure.toolIcon".into()
+        })
+    );
+    write("DELETE FROM orchestration_v2_projection_threads WHERE thread_id = 'fx-bad-icon';");
     // A legacy single linked PR: Node answers, Rust declines (URL parser not ported).
     let mut legacy = fixture::Fx::default();
     let mut p = fixture::thread_payload(
@@ -4095,8 +4120,8 @@ fn shell_builder_matches_node_on_fixtures() {
 /// Plan 6B Task 6, Review Focus 3: the builder against Node on a copy of the owner's DB
 /// (`VEKREL_REAL_DB`). The engine runs on the copy (isolated: no provider can start); Node's shell
 /// is captured once into a temp dir and compared per thread at the same sequence. Prints
-/// mismatch counts by JSON path and the differing thread ids, never content. A Rust decline is
-/// printed with its reason (Node answers those); a served answer must match byte for byte.
+/// mismatch counts by JSON path and the differing thread ids, never content. Rust must neither
+/// decline (declined == 0) nor differ.
 #[test]
 #[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs> and VEKREL_REAL_DB=<statev2.sqlite>"]
 fn shell_builder_matches_node_on_owner_db() {
@@ -4147,7 +4172,7 @@ fn shell_builder_matches_node_on_owner_db() {
             println!("{label}: sequence_skew (Node {seq}, Rust {rseq}), retrying");
         };
         match rust {
-            Err(e) => println!(
+            Err(e) => panic!(
                 "GOLDEN {label}: Rust declined ({}: {e:?}); Node {} threads",
                 e.reason(),
                 node.len()

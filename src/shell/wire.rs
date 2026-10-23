@@ -1,14 +1,35 @@
 //! Effect Schema decoding of the JSON columns the shell reads, ported schema by schema from
 //! `packages/contracts/src` (Engine 2aa67bc). `decode` gives the value as Effect would encode it
 //! again: keys in schema order, excess keys dropped, `TrimmedString`s trimmed, decoding defaults
-//! filled, `DateTimeUtc` in `toISOString` form. A value Effect would reject is `Err` with its path,
-//! and the caller declines (Node's decode fails the whole snapshot with a 500).
+//! filled, `DateTimeUtc` in `toISOString` form. A value Effect would reject is `Err(Drift::Reject)`
+//! with its path (Node's decode fails there); a value Rust cannot judge is `Err(Drift::Limit)`.
+//! Callers decline on both, except where Node swallows a decode failure (`orElseSucceed`): only a
+//! `Reject` is swallowed there.
 use crate::js_string;
 use serde_json::{Map, Value};
 
-/// Where a payload stops decoding as Effect decodes it (a JSON path; names, never values).
+/// Where a payload stops decoding (a JSON path; names, never values).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Drift(pub String);
+pub enum Drift {
+    /// Effect rejects the value here.
+    Reject(String),
+    /// Rust's port stops short here (a date form or JSON text it does not parse); Effect may accept.
+    Limit(String),
+}
+
+impl Drift {
+    pub fn reject(path: &str) -> Self {
+        Drift::Reject(path.to_owned())
+    }
+    pub fn path(&self) -> &str {
+        match self {
+            Drift::Reject(p) | Drift::Limit(p) => p,
+        }
+    }
+    pub fn is_limit(&self) -> bool {
+        matches!(self, Drift::Limit(_))
+    }
+}
 
 type R = Result<Value, Drift>;
 
@@ -27,7 +48,7 @@ pub enum S {
     /// `Schema.Number` checked `isFinite`.
     Finite,
     /// `Schema.DateTimeUtc` / `DateTimeUtcFromString`.
-    /// shortcut: only the canonical `toISOString` form decodes; other forms `DateTime.make` accepts drift (decline). Port its parser if real rows hold them.
+    /// shortcut: only the canonical `toISOString` form decodes; any other string is a `Limit` (decline), a non-string a `Reject`. Port `DateTime.make`'s parser if real rows hold other forms.
     Date,
     Lit(&'static [&'static str]),
     /// `Schema.Literal(true)` / `Schema.Literal(2)`.
@@ -57,7 +78,7 @@ pub enum K {
 pub struct F(pub &'static str, pub K, pub S);
 
 fn drift(path: &str) -> Drift {
-    Drift(path.to_owned())
+    Drift::reject(path)
 }
 
 /// `s.trim()` (ECMAScript whitespace).
@@ -115,11 +136,12 @@ pub fn decode(s: &S, v: &Value, path: &str) -> R {
             Some(f) if f.is_finite() => Ok(v.clone()),
             _ => Err(drift(path)),
         },
-        S::Date => v
-            .as_str()
-            .and_then(crate::effect_json::date)
-            .map(|d| Value::String(d.to_owned()))
-            .ok_or_else(|| drift(path)),
+        S::Date => match v.as_str() {
+            Some(t) => crate::effect_json::date(t)
+                .map(|d| Value::String(d.to_owned()))
+                .ok_or_else(|| Drift::Limit(path.to_owned())),
+            None => Err(drift(path)),
+        },
         S::Lit(set) => match v.as_str() {
             Some(x) if set.contains(&x) => Ok(v.clone()),
             _ => Err(drift(path)),
@@ -142,10 +164,20 @@ pub fn decode(s: &S, v: &Value, path: &str) -> R {
                 .map(Value::Array)
         }
         S::Struct(fields) => decode_struct(fields, v, path).map(Value::Object),
-        S::Union(members) => members
-            .iter()
-            .find_map(|m| decode(m, v, path).ok())
-            .ok_or_else(|| drift(path)),
+        S::Union(members) => {
+            // Effect rejects only when every member rejects; a member Rust cannot judge leaves it open.
+            let mut limit = false;
+            for m in members {
+                match decode(m, v, path) {
+                    Ok(x) => return Ok(x),
+                    Err(e) => limit |= e.is_limit(),
+                }
+            }
+            Err(match limit {
+                true => Drift::Limit(path.to_owned()),
+                false => drift(path),
+            })
+        }
         S::Custom(f) => f(v, path),
     }
 }
@@ -694,13 +726,67 @@ pub const RUNTIME_REQUEST_JSON: S = S::Struct(&[
     F("answers", K::Opt, S::Obj),
 ]);
 
+// --- contracts/providerRuntime.ts:393-431 ---
+
+/// `appId`: non-blank, 512 max, `^[A-Za-z0-9._-]+$` (on the trimmed value).
+fn app_id(v: &Value, path: &str) -> R {
+    let t = decode(&S::NonBlank(Some(512)), v, path)?;
+    let ok = t.as_str().is_some_and(|s| {
+        s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    });
+    ok.then_some(t).ok_or_else(|| drift(path))
+}
+const URL4096: S = S::NonBlank(Some(4096));
+/// `ToolActivityIcon`: a union of `TaggedStruct`s (`_tag` first).
+pub const TOOL_ACTIVITY_ICON: S = S::Union(&[
+    S::Struct(&[
+        F("_tag", K::Req, S::Lit(&["website"])),
+        F("pageUrl", K::Req, URL4096),
+        F("faviconUrl", K::Opt, URL4096),
+        F("faviconUrlDark", K::Opt, URL4096),
+    ]),
+    S::Struct(&[
+        F("_tag", K::Req, S::Lit(&["native-app"])),
+        F(
+            "app",
+            K::Req,
+            S::Union(&[
+                S::Struct(&[
+                    F("_tag", K::Req, S::Lit(&["app-id"])),
+                    F("appId", K::Req, S::Custom(app_id)),
+                ]),
+                S::Struct(&[
+                    F("_tag", K::Req, S::Lit(&["display-name"])),
+                    F("displayName", K::Req, S::NonBlank(Some(160))),
+                ]),
+            ]),
+        ),
+    ]),
+    S::Struct(&[
+        F("_tag", K::Req, S::Lit(&["themed-logo"])),
+        F("logoUrl", K::Req, URL4096),
+        F("logoUrlDark", K::Opt, URL4096),
+    ]),
+]);
+/// `ToolActivitySource`.
+pub const TOOL_ACTIVITY_SOURCE: S = S::Struct(&[
+    F("key", K::Req, S::NonBlank(Some(512))),
+    F("name", K::Req, S::NonBlank(Some(160))),
+    F(
+        "kind",
+        K::Req,
+        S::Lit(&["browser", "computer", "integration"]),
+    ),
+    F("icon", K::Opt, TOOL_ACTIVITY_ICON),
+]);
+
 /// The base fields of every `OrchestrationV2TurnItemJson` member (`:2095-2100`, `:1305-1325`).
-/// shortcut: `toolIcon` and `toolSource` are checked as present-or-absent only (the shell never reads them); port `ToolActivityIcon`/`ToolActivitySource` if a mismatch shows.
 const TURN_ITEM_BASE: [F; 18] = [
     F("toolNonExecutionKind", K::Opt, S::Str),
     F("toolSurface", K::Opt, S::Lit(&["browser", "computer"])),
-    F("toolIcon", K::Opt, S::Obj),
-    F("toolSource", K::Opt, S::Obj),
+    F("toolIcon", K::Opt, TOOL_ACTIVITY_ICON),
+    F("toolSource", K::Opt, TOOL_ACTIVITY_SOURCE),
     F("id", K::Req, ID),
     F("threadId", K::Req, ID),
     F("runId", K::Req, NULL_ID),
@@ -882,7 +968,7 @@ mod tests {
     #[test]
     fn trimmed_strings_trim_with_js_whitespace_and_reject_blank() {
         assert_eq!(de(&ID, json!("\u{feff} a \u{a0}")), Ok(json!("a")));
-        assert_eq!(de(&ID, json!(" \u{2028} ")), Err(Drift("$".into())));
+        assert_eq!(de(&ID, json!(" \u{2028} ")), Err(Drift::reject("$")));
         // U+0085 is not JS whitespace: kept.
         assert_eq!(de(&ID, json!("a\u{85}")), Ok(json!("a\u{85}")));
         assert_eq!(de(&S::NonBlank(Some(2)), json!(" 😀 ")), Ok(json!("😀")));
@@ -895,6 +981,39 @@ mod tests {
             assert!(de(&S::Slug, json!(bad)).is_err(), "{bad}");
         }
         assert!(de(&S::Slug, json!("a".repeat(65))).is_err());
+    }
+
+    #[test]
+    fn rejects_and_limits_are_told_apart() {
+        assert_eq!(
+            de(&DATE, json!("2026-10-23T08:00:00Z")),
+            Err(Drift::Limit("$".into()))
+        );
+        assert_eq!(de(&DATE, json!(1)), Err(Drift::reject("$")));
+        // A union with a member Rust cannot judge stays open; all-reject is a reject.
+        const U: S = S::Union(&[S::Bool, S::Date]);
+        assert_eq!(de(&U, json!("2026")), Err(Drift::Limit("$".into())));
+        assert_eq!(de(&U, json!(1)), Err(Drift::reject("$")));
+        const T: S = S::Struct(&[F("at", K::Req, DATE)]);
+        assert!(
+            de(&T, json!({"at": "x"})).unwrap_err().is_limit(),
+            "limits pass up"
+        );
+        assert_eq!(
+            de(
+                &TOOL_ACTIVITY_ICON,
+                json!({"pageUrl": " u ", "_tag": "website", "x": 1})
+            )
+            .map(|v| text(&v)),
+            Ok(r#"{"_tag":"website","pageUrl":"u"}"#.into())
+        );
+        assert!(
+            de(
+                &TOOL_ACTIVITY_ICON,
+                json!({"_tag": "native-app", "app": {"_tag": "app-id", "appId": "a/b"}})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -927,10 +1046,10 @@ mod tests {
         ]);
         let v = de(&T, json!({"x": 1, "d": [" i "], "a": "s"})).unwrap();
         assert_eq!(text(&v), r#"{"a":"s","c":null,"d":["i"]}"#);
-        assert_eq!(de(&T, json!({"b": true})), Err(Drift("$.a".into())));
+        assert_eq!(de(&T, json!({"b": true})), Err(Drift::reject("$.a")));
         assert_eq!(
             de(&T, json!({"a": "s", "d": ["ok", " "]})),
-            Err(Drift("$.d[1]".into()))
+            Err(Drift::reject("$.d[1]"))
         );
         assert!(de(&T, json!([])).is_err());
         assert!(de(&T, json!(null)).is_err());
@@ -1012,7 +1131,7 @@ mod tests {
         );
         let mut b = base.clone();
         b["forkedFrom"] = json!({"type": "other"});
-        assert_eq!(de(&APP_THREAD_JSON, b), Err(Drift("$.forkedFrom".into())));
+        assert_eq!(de(&APP_THREAD_JSON, b), Err(Drift::reject("$.forkedFrom")));
         let mut b = base;
         b["pullRequests"] = json!([{"host": "github.com", "repository": "o/r", "number": 1,
             "url": "u", "source": "manual", "linkedAt": "x", "snapshot": null, "stack": null,
@@ -1069,7 +1188,7 @@ mod tests {
         assert_eq!(decode_turn_item(&other, "$"), Ok(None));
         let mut bad = item;
         bad.as_object_mut().unwrap().remove("input");
-        assert_eq!(decode_turn_item(&bad, "$"), Err(Drift("$.input".into())));
+        assert_eq!(decode_turn_item(&bad, "$"), Err(Drift::reject("$.input")));
         assert!(decode_turn_item(&json!({}), "$").is_err());
     }
 }

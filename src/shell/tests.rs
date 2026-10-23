@@ -347,24 +347,35 @@ fn pending_runtime_requests_and_secrets() {
 
 #[test]
 fn pending_background_work_on_a_settled_run() {
+    let sub = json!({"subagentId": "n", "origin": "provider_native", "driver": "codex",
+        "providerInstanceId": "codex", "childThreadId": "child", "prompt": " look ", "result": null,
+        "providerThreadId": "pt1"});
+    let base = |fx: &mut Fx| {
+        fx.thread("t", 1, json!({"activeProviderThreadId": "pt1"}))
+            .run("t", 1, "completed", json!({}))
+            .provider_thread("t", "pt1", "codex", json!({"pendingBackgroundTasks": [{"taskId": "bg", "kind": "subagent", "description": " d "}],
+                "goal": {"objective": " ship ", "status": "active"}}))
+            .provider_thread("t", "pt0", "claudeAgent", json!({"createdAt": "2025-12-31T00:00:00.000Z",
+                "pendingBackgroundTasks": [{"taskId": "other", "kind": "command"}]}))
+            .item("t", "done", Some(1), "command_execution", "completed", json!({"input": "x"}));
+    };
     let mut fx = Fx::default();
-    fx.thread("t", 1, json!({"activeProviderThreadId": "pt1"}))
-        .run("t", 1, "completed", json!({}))
-        .provider_thread("t", "pt1", "codex", json!({"pendingBackgroundTasks": [{"taskId": "bg", "kind": "subagent", "description": " d "}],
-            "goal": {"objective": " ship ", "status": "active"}}))
-        .provider_thread("t", "pt0", "claudeAgent", json!({"createdAt": "2025-12-31T00:00:00.000Z"}))
-        .item("t", "cmd", Some(1), "command_execution", "running", json!({"input": " sleep 5 "}))
-        .item("t", "done", Some(1), "command_execution", "completed", json!({"input": "x"}))
-        .item("t", "sub", Some(1), "subagent", "waiting", json!({"subagentId": "n", "origin": "provider_native",
-            "driver": "codex", "providerInstanceId": "codex", "childThreadId": "child", "prompt": " look ", "result": null,
-            "providerThreadId": "pt1"}));
+    base(&mut fx);
+    fx.item(
+        "t",
+        "cmd",
+        Some(1),
+        "command_execution",
+        "running",
+        json!({"input": " sleep 5 "}),
+    );
     let t = one(&fx);
+    // Only the active provider thread's tasks, then the one pending item.
     assert_eq!(
         text(&t["pendingBackgroundTasks"]),
         concat!(
             r#"[{"taskId":"bg","description":"d","kind":"subagent","providerInstanceId":"codex"},"#,
-            r#"{"taskId":"cmd","description":"sleep 5","kind":"command"},"#,
-            r#"{"taskId":"sub","description":"look","kind":"subagent","providerInstanceId":"codex","childThreadId":"child"}]"#
+            r#"{"taskId":"cmd","description":"sleep 5","kind":"command"}]"#
         )
     );
     assert_eq!(
@@ -375,9 +386,50 @@ fn pending_background_work_on_a_settled_run() {
         text(&t["goal"]),
         r#"{"objective":"ship","status":"active"}"#
     );
-    // While a run is active, nothing is pending.
+    let mut fx = Fx::default();
+    base(&mut fx);
+    fx.item("t", "sub", Some(1), "subagent", "waiting", sub.clone());
+    assert_eq!(
+        text(&one(&fx)["pendingBackgroundTasks"]),
+        concat!(
+            r#"[{"taskId":"bg","description":"d","kind":"subagent","providerInstanceId":"codex"},"#,
+            r#"{"taskId":"sub","description":"look","kind":"subagent","providerInstanceId":"codex","childThreadId":"child"}]"#
+        )
+    );
+    // Two qualifying items: their order is SQLite's plan. Decline.
+    fx.item(
+        "t",
+        "cmd",
+        Some(1),
+        "command_execution",
+        "running",
+        json!({"input": "x"}),
+    );
+    let unordered = Decline::NotPorted {
+        thread_id: "t".into(),
+        what: "unordered_rows",
+    };
+    assert_eq!(build(&fx, Location::Active), Err(unordered.clone()));
+    // While a run is active, nothing is pending (the gate comes first).
     fx.run("t", 2, "running", json!({}));
     assert_eq!(one(&fx)["pendingBackgroundTasks"], json!([]));
+    // No active provider thread: both rows with tasks contribute. Decline.
+    let mut fx = Fx::default();
+    fx.thread("t", 1, json!({}))
+        .run("t", 1, "completed", json!({}))
+        .provider_thread(
+            "t",
+            "pt1",
+            "codex",
+            json!({"pendingBackgroundTasks": [{"taskId": "a", "kind": "command"}]}),
+        )
+        .provider_thread(
+            "t",
+            "pt2",
+            "codex",
+            json!({"pendingBackgroundTasks": [{"taskId": "b", "kind": "command"}]}),
+        );
+    assert_eq!(build(&fx, Location::Active), Err(unordered));
 }
 
 #[test]
@@ -602,10 +654,15 @@ fn drift_and_unknown_kinds_decline_with_their_reason() {
     assert_eq!(e.reason(), "payload_drift");
     let mut fx = Fx::default();
     fx.thread("t", 1, json!({"createdAt": "2026-01-01T00:00:00Z"}));
-    assert!(matches!(
-        build(&fx, Location::Active),
-        Err(Decline::PayloadDrift { .. })
-    ));
+    let e = build(&fx, Location::Active).unwrap_err();
+    assert_eq!(
+        e,
+        Decline::DecodeLimit {
+            thread_id: "t".into(),
+            path: "thread.createdAt".into()
+        }
+    );
+    assert_eq!(e.reason(), "decode_limit");
     // A fork source that does not decode fails the snapshot, as in Node.
     let mut fx = Fx::default();
     fx.thread("src", 1, json!({"archivedAt": T0, "title": " "}))
@@ -677,7 +734,7 @@ fn the_live_scenarios_all_build() {
     let fx = super::fixture::scenarios();
     let active = build(&fx, Location::Active).unwrap();
     let archived = build(&fx, Location::Archive).unwrap();
-    assert_eq!((active.len(), archived.len()), (30, 4));
+    assert_eq!((active.len(), archived.len()), (34, 4));
     assert!(
         active
             .iter()
@@ -689,10 +746,24 @@ fn the_live_scenarios_all_build() {
         concat!(
             r#"[{"taskId":"fx-bg-task","description":"d","kind":"subagent","providerInstanceId":"codex"},"#,
             r#"{"taskId":"fx-bg-future","description":"f","kind":"background_task"},"#,
-            r#"{"taskId":"fx-bg-cmd","description":"sleep 5","kind":"command"},"#,
-            r#"{"taskId":"fx-bg-tool","description":"T","kind":"background_task"},"#,
-            r#"{"taskId":"native-sub","description":"look","kind":"subagent","providerInstanceId":"codex","childThreadId":"child"}]"#
+            r#"{"taskId":"fx-bg-cmd","description":"sleep 5","kind":"command"}]"#
         )
+    );
+    assert_eq!(
+        text(&by_id(&active, "fx-bg-tool")["pendingBackgroundTasks"]),
+        r#"[{"taskId":"fx-bg-tool-a","description":"T","kind":"background_task"}]"#
+    );
+    assert_eq!(
+        text(&by_id(&active, "fx-bg-sub")["pendingBackgroundTasks"]),
+        r#"[{"taskId":"native-sub","description":"look","kind":"subagent","providerInstanceId":"codex","childThreadId":"child"}]"#
+    );
+    assert_eq!(
+        by_id(&active, "fx-limit-icon")["latestRunId"],
+        "fx-limit-icon:run:1"
+    );
+    assert_eq!(
+        by_id(&active, "fx-limit-bad-icon")["latestRunId"],
+        "fx-limit-bad-icon:run:2"
     );
     // A v1-import source counts its runless items in the inherited prefix.
     assert_eq!(by_id(&active, "fx-mid")["visibleItemCount"], 1 + 2 + 1 + 1);
@@ -700,5 +771,88 @@ fn the_live_scenarios_all_build() {
     assert_eq!(
         by_id(&active, "fx-deep-leaf")["visibleItemCount"],
         3 + 1 + 1 + 1
+    );
+}
+
+/// A failed blocking run whose error item carries `extra`, behind a queued run.
+fn limited(extra: Value) -> Fx {
+    let mut err = json!({"nodeId": "t:run:1:root", "failure": {"class": "usage_limit", "message": "limit",
+        "code": null, "retryable": false}});
+    for (k, x) in extra.as_object().unwrap() {
+        err[k] = x.clone();
+    }
+    let mut fx = Fx::default();
+    fx.thread("t", 1, json!({}))
+        .run("t", 1, "failed", json!({"completedAt": at(3)}))
+        .item("t", "e1", Some(1), "error", "failed", err)
+        .run("t", 2, "queued", json!({}));
+    fx
+}
+
+#[test]
+fn the_blocking_failure_swallows_only_what_effect_rejects() {
+    let icons = [
+        json!({"_tag": "website", "pageUrl": " https://x "}),
+        json!({"_tag": "native-app", "app": {"_tag": "app-id", "appId": "com.app_1-x"}}),
+        json!({"_tag": "native-app", "app": {"_tag": "display-name", "displayName": "Mail"}}),
+        json!({"_tag": "themed-logo", "logoUrl": "l", "logoUrlDark": "d"}),
+    ];
+    for icon in icons {
+        let t = one(&limited(json!({"toolIcon": icon,
+            "toolSource": {"key": "k", "name": "n", "kind": "browser", "icon": icon}})));
+        assert_eq!(
+            t["latestRunId"], "t:run:1",
+            "a valid icon decodes: the limit holds the queue"
+        );
+    }
+    let rejected = [
+        json!({"toolIcon": {"_tag": "website"}}),
+        json!({"toolIcon": {"_tag": "planet", "pageUrl": "p"}}),
+        json!({"toolIcon": {"pageUrl": "p"}}),
+        json!({"toolIcon": {"_tag": "native-app", "app": {"_tag": "app-id", "appId": "has space"}}}),
+        json!({"toolIcon": {"_tag": "native-app", "app": {"_tag": "display-name", "displayName": "x".repeat(161)}}}),
+        json!({"toolIcon": {"_tag": "website", "pageUrl": "x".repeat(4097)}}),
+        json!({"toolSource": {"key": "k", "name": "n", "kind": "tool"}}),
+        json!({"toolSource": {"key": " ", "name": "n", "kind": "browser"}}),
+        json!({"toolSource": {"key": "k", "name": "n", "kind": "browser", "icon": {"_tag": "themed-logo"}}}),
+    ];
+    for bad in &rejected {
+        // Node's decode fails, `orElseSucceed` gives null: the queued run is presented.
+        let t = one(&limited(bad.clone()));
+        assert_eq!(t["latestRunId"], "t:run:2", "{bad}");
+        assert_eq!(t["lastErrorClass"], Value::Null, "{bad}");
+    }
+    // The same payload as the presented run's terminal failure: Node's snapshot fails (500).
+    let mut err = failure("provider_error", "x");
+    err["nodeId"] = "t:run:1:root".into();
+    err["toolIcon"] = json!({"_tag": "website"});
+    let mut fx = Fx::default();
+    fx.thread("t", 1, json!({}))
+        .run("t", 1, "failed", json!({}))
+        .item("t", "e1", Some(1), "error", "failed", err);
+    assert_eq!(
+        build(&fx, Location::Active),
+        Err(Decline::PayloadDrift {
+            thread_id: "t".into(),
+            path: "terminalFailure.toolIcon".into()
+        })
+    );
+    // What Rust cannot judge is never null: a non-canonical date, an unported type.
+    assert_eq!(
+        build(
+            &limited(json!({"updatedAt": "2026-01-01T00:00:00Z"})),
+            Location::Active
+        ),
+        Err(Decline::DecodeLimit {
+            thread_id: "t".into(),
+            path: "blockingFailure.updatedAt".into()
+        })
+    );
+    assert_eq!(
+        build(&limited(json!({"type": "notification"})), Location::Active),
+        Err(Decline::ItemKindNotPorted {
+            thread_id: "t".into(),
+            kind: "notification".into()
+        })
     );
 }

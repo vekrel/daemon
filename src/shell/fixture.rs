@@ -383,20 +383,85 @@ pub fn scenarios() -> Fx {
         .run("fx-secret", 1, "running", json!({}))
         .item("fx-secret", "fx-secret-s", Some(1), "secret_request", "waiting",
             json!({"nodeId": "n", "label": "API key", "reason": "r", "secretStatus": "pending", "startedAt": at(2)}));
+    // One contributing provider thread and one qualifying item per thread: with more, the order
+    // is SQLite's plan and Rust declines (`unordered_rows`).
     fx.thread("fx-bg", 23, json!({"activeProviderThreadId": "fx-bg-pt1"}))
         .run("fx-bg", 1, "completed", json!({}))
-        .provider_thread("fx-bg", "fx-bg-pt1", "codex", json!({"pendingBackgroundTasks": [
+        .provider_thread(
+            "fx-bg",
+            "fx-bg-pt1",
+            "codex",
+            json!({"pendingBackgroundTasks": [
             {"taskId": "fx-bg-task", "kind": "subagent", "description": " d "},
             {"taskId": "fx-bg-future", "kind": "future", "description": "f"}],
-            "goal": {"objective": " ship ", "status": "active", "tokensUsed": 3}}))
-        .provider_thread("fx-bg", "fx-bg-pt0", "claudeAgent", json!({"createdAt": "2025-12-31T00:00:00.000Z"}))
-        .item("fx-bg", "fx-bg-cmd", Some(1), "command_execution", "running", json!({"input": " sleep 5 "}))
-        .item("fx-bg", "fx-bg-done", Some(1), "command_execution", "completed", json!({"input": "x"}))
-        .item("fx-bg", "fx-bg-tool", Some(1), "dynamic_tool", "pending", json!({"toolName": " tool ", "input": {}, "title": " T "}))
-        .item("fx-bg", "fx-bg-persist", Some(1), "dynamic_tool", "running", json!({"toolName": "watch", "input": {"persistent": true}}))
-        .item("fx-bg", "fx-bg-sub", Some(1), "subagent", "waiting", json!({"subagentId": "n", "origin": "provider_native",
+            "goal": {"objective": " ship ", "status": "active", "tokensUsed": 3}}),
+        )
+        .provider_thread(
+            "fx-bg",
+            "fx-bg-pt0",
+            "claudeAgent",
+            json!({"createdAt": "2025-12-31T00:00:00.000Z",
+            "pendingBackgroundTasks": [{"taskId": "fx-bg-inactive", "kind": "command"}]}),
+        )
+        .item(
+            "fx-bg",
+            "fx-bg-cmd",
+            Some(1),
+            "command_execution",
+            "running",
+            json!({"input": " sleep 5 "}),
+        )
+        .item(
+            "fx-bg",
+            "fx-bg-done",
+            Some(1),
+            "command_execution",
+            "completed",
+            json!({"input": "x"}),
+        )
+        .item(
+            "fx-bg",
+            "fx-bg-persist",
+            Some(1),
+            "dynamic_tool",
+            "running",
+            json!({"toolName": "watch", "input": {"persistent": true}}),
+        );
+    fx.thread("fx-bg-tool", 37, json!({}))
+        .run("fx-bg-tool", 1, "completed", json!({}))
+        .item(
+            "fx-bg-tool",
+            "fx-bg-tool-a",
+            Some(1),
+            "dynamic_tool",
+            "pending",
+            json!({"toolName": " tool ", "input": {}, "title": " T "}),
+        );
+    fx.thread("fx-bg-sub", 38, json!({}))
+        .run("fx-bg-sub", 1, "interrupted", json!({}))
+        .item("fx-bg-sub", "fx-bg-sub-a", Some(1), "subagent", "waiting", json!({"subagentId": "n", "origin": "provider_native",
             "driver": "codex", "providerInstanceId": "codex", "childThreadId": "child", "prompt": " look ", "result": null,
             "providerThreadId": "fx-bg-pt1", "nativeItemRef": {"driver": "codex", "nativeId": "native-sub", "strength": "strong"}}));
+    // A usage-limited blocking run whose error item has a valid icon (it holds the queue) and one
+    // Effect rejects (`orElseSucceed`: null, the queued run is presented).
+    for (id, icon) in [
+        (
+            "fx-limit-icon",
+            json!({"_tag": "native-app", "app": {"_tag": "app-id", "appId": "com.app"}}),
+        ),
+        (
+            "fx-limit-bad-icon",
+            json!({"_tag": "native-app", "app": {"_tag": "app-id", "appId": "bad id"}}),
+        ),
+    ] {
+        let mut err = failure("usage_limit", "limit", &format!("{id}:run:1:root"));
+        err["toolIcon"] = icon;
+        err["toolSource"] = json!({"key": "k", "name": "n", "kind": "integration"});
+        fx.thread(id, 39, json!({}))
+            .run(id, 1, "failed", json!({"completedAt": at(3)}))
+            .item(id, &format!("{id}-e"), Some(1), "error", "failed", err)
+            .run(id, 2, "queued", json!({}));
+    }
     fx.thread("fx-running", 24, json!({}))
         .run("fx-running", 1, "running", json!({}))
         .item(

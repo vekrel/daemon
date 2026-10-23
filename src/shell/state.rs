@@ -412,9 +412,24 @@ pub fn derive_pending_background_work(
         return Ok(vec![]);
     }
     let mut by_task_id = Obj::new();
-    let threads = provider_threads
+    let threads: Vec<&Value> = provider_threads
         .iter()
-        .filter(|t| active_provider_thread_id.is_null() || &t["id"] == active_provider_thread_id);
+        .filter(|t| active_provider_thread_id.is_null() || &t["id"] == active_provider_thread_id)
+        .collect();
+    // The provider-thread and pending-item rows come from SQL without `ORDER BY`, and the result
+    // keeps the first task per id in row order: with more than one contributing row, Node's order
+    // is SQLite's plan, which Rust cannot reproduce. Decline.
+    let contributing = threads
+        .iter()
+        .filter(|t| {
+            t["pendingBackgroundTasks"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        })
+        .count();
+    if contributing > 1 || pending_background_turn_items(turn_items).count() > 1 {
+        return Err("unordered_rows");
+    }
     for pt in threads {
         for task in pt["pendingBackgroundTasks"]
             .as_array()
@@ -485,19 +500,25 @@ pub fn run_maps_by_thread_id(runs: &[ShellRunRow], counts: &[ShellRunItemCountRo
     (ordinals, items)
 }
 
+/// `JSON.parse`; text serde rejects (lone surrogate escapes, deep nesting) may be valid JS JSON.
 fn parse(text: &str, thread_id: &str, what: &str) -> Result<Value, Decline> {
-    crate::effect_json::parse(text).ok_or_else(|| Decline::PayloadDrift {
+    crate::effect_json::parse(text).ok_or_else(|| Decline::DecodeLimit {
         thread_id: thread_id.to_owned(),
         path: what.to_owned(),
     })
 }
 
+fn drift_decline(d: wire::Drift, thread_id: &str, what: &str) -> Decline {
+    let (thread_id, path) = (thread_id.to_owned(), format!("{what}{}", &d.path()[1..]));
+    match d {
+        wire::Drift::Reject(_) => Decline::PayloadDrift { thread_id, path },
+        wire::Drift::Limit(_) => Decline::DecodeLimit { thread_id, path },
+    }
+}
+
 fn decode(schema: &wire::S, text: &str, thread_id: &str, what: &str) -> Result<Value, Decline> {
     let v = parse(text, thread_id, what)?;
-    wire::decode(schema, &v, "$").map_err(|d| Decline::PayloadDrift {
-        thread_id: thread_id.to_owned(),
-        path: format!("{what}{}", &d.0[1..]),
-    })
+    wire::decode(schema, &v, "$").map_err(|d| drift_decline(d, thread_id, what))
 }
 
 fn decode_turn_item(text: &str, thread_id: &str, what: &str) -> Result<Value, Decline> {
@@ -508,10 +529,7 @@ fn decode_turn_item(text: &str, thread_id: &str, what: &str) -> Result<Value, De
             thread_id: thread_id.to_owned(),
             kind: v["type"].as_str().unwrap_or_default().to_owned(),
         }),
-        Err(d) => Err(Decline::PayloadDrift {
-            thread_id: thread_id.to_owned(),
-            path: format!("{what}{}", &d.0[1..]),
-        }),
+        Err(d) => Err(drift_decline(d, thread_id, what)),
     }
 }
 
@@ -520,7 +538,7 @@ fn date(text: Option<&String>, thread_id: &str, what: &str) -> Result<Option<Str
     text.map(|t| {
         crate::effect_json::date(t)
             .map(str::to_owned)
-            .ok_or_else(|| Decline::PayloadDrift {
+            .ok_or_else(|| Decline::DecodeLimit {
                 thread_id: thread_id.to_owned(),
                 path: what.to_owned(),
             })
@@ -629,8 +647,13 @@ pub fn shell_thread_state_from_row(
     if let (Some(blocking_run_id), Some(p)) =
         (&row.blocking_run_id, &row.blocking_failure_payload_json)
     {
-        // `Effect.orElseSucceed(() => null)`: a payload that does not decode is no failure.
-        let blocking_failure = decode_turn_item(p, tid, "blockingFailure").ok();
+        // `Effect.orElseSucceed(() => null)`: a payload Effect rejects is no failure. Anything Rust
+        // cannot judge (a decode limit, a type not ported) declines rather than guess null.
+        let blocking_failure = match decode_turn_item(p, tid, "blockingFailure") {
+            Ok(item) => Some(item),
+            Err(Decline::PayloadDrift { .. }) => None,
+            Err(e) => return Err(e),
+        };
         let failure = blocking_failure
             .as_ref()
             .filter(|f| f["type"] == "error")
@@ -839,7 +862,7 @@ pub fn shell_from_state(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|d| Decline::PayloadDrift {
             thread_id: tid.to_owned(),
-            path: d.0,
+            path: d.path().to_owned(),
         })?;
     put("pendingBackgroundTasks", Value::Array(tasks));
     put(
@@ -1114,15 +1137,39 @@ mod tests {
                 json!({"id": "c3", "input": "  "}),
             ),
         ];
-        let all = derive_pending_background_work(SETTLED, &pts, &items, &Value::Null, false, None);
+        let d = |pts: &[Value], items: &[Value], active: Value| {
+            derive_pending_background_work(SETTLED, pts, items, &active, false, None)
+        };
+        // Two contributing provider threads, or two qualifying items: SQL order decides. Decline.
+        assert_eq!(d(&pts, &[], Value::Null), Err("unordered_rows"));
+        assert_eq!(d(&[], &items, Value::Null), Err("unordered_rows"));
+        // A provider thread with no tasks does not contribute.
+        let idle = json!({"id": "p0", "providerInstanceId": "x", "pendingBackgroundTasks": []});
+        // Non-qualifying items (persistent tool, completed, file change) do not count.
+        let quiet = [items[2].clone(), items[3].clone(), items[4].clone()];
+        let one = |i: usize| [&quiet[..], &[items[i].clone()]].concat();
         assert_eq!(
-            tasks(all),
+            tasks(d(&[pts[0].clone(), idle.clone()], &one(0), Value::Null)),
             concat!(
                 r#"[{"taskId":"t1","kind":"subagent","providerInstanceId":"codex","description":"d"},"#,
-                r#"{"taskId":"t2","kind":"monitor"},{"taskId":"t3","kind":"command"},"#,
-                r#"{"taskId":"s","description":"go","kind":"subagent","providerInstanceId":"codex","childThreadId":"c"},"#,
-                r#"{"taskId":"c2","description":"T","kind":"command"},{"taskId":"c3","kind":"command"}]"#
+                r#"{"taskId":"t2","kind":"monitor"},"#,
+                r#"{"taskId":"s","description":"go","kind":"subagent","providerInstanceId":"codex","childThreadId":"c"}]"#
             )
+        );
+        // An item whose native id names a provider task is that task (provider first).
+        assert_eq!(
+            tasks(d(&pts[1..], &one(1), Value::Null)),
+            r#"[{"taskId":"t1","kind":"command"},{"taskId":"t3","kind":"command"}]"#
+        );
+        assert_eq!(
+            tasks(d(&[], &one(5), Value::Null)),
+            r#"[{"taskId":"c2","description":"T","kind":"command"}]"#,
+            "an empty native id falls back to the item id; the title wins"
+        );
+        assert_eq!(
+            tasks(d(&[], &one(6), Value::Null)),
+            r#"[{"taskId":"c3","kind":"command"}]"#,
+            "a blank command has no description"
         );
         // The active provider thread only.
         let one = derive_pending_background_work(SETTLED, &pts, &[], &json!("p2"), false, None);
