@@ -242,8 +242,9 @@ pub struct Compare {
     pub ignore: &'static [&'static str],
     pub times: &'static [&'static str],
     pub headers: &'static [&'static str],
-    /// Values Node's warm in-memory caches fill in where Rust answers the cold `null`: Node set and
-    /// Rust `null` is `node_warm_enrichment` (counted, not a mismatch) when nothing else differs.
+    /// Values Node's warm in-memory caches fill in where Rust answers the cold `null`. Still a
+    /// mismatch; when nothing else differs its field is `ENRICHMENT`, and otherwise the first
+    /// other differing path is reported, so enrichment never hides another difference.
     pub enrich: &'static [&'static str],
 }
 
@@ -266,8 +267,8 @@ impl Compare {
 
 const SKEW_MS: i64 = 2000;
 
-/// `diff`'s field for an answer that differs only where `Compare::enrich` allows.
-pub const NODE_WARM_ENRICHMENT: &str = "node_warm_enrichment";
+/// `diff`'s field for a mismatch only at `Compare::enrich` paths (Node set, Rust `null`).
+pub const ENRICHMENT: &str = "enrichment";
 
 /// The first difference between Node's response and Rust's: (field, JSON path or header name).
 pub fn diff(
@@ -304,11 +305,17 @@ pub fn diff(
     if !canonical(&a, body) || !canonical(&b, rust.body()) {
         return Some(("body", "$ (formatting)".into()));
     }
+    let raw = (!cmp.enrich.is_empty()).then(|| (a.clone(), b.clone()));
     let mut warm = false;
     mask(cmp, &mut a, &mut b, "$".into(), &mut warm);
     // Byte-exact: Value equality ignores key order, and Node's order follows its schema.
     if serde_json::to_vec(&a).ok() == serde_json::to_vec(&b).ok() {
-        return warm.then(|| (NODE_WARM_ENRICHMENT, "$".into()));
+        // Only enrichment differs: still a mismatch, at its first path, labelled for grepping.
+        return warm.then(|| {
+            let (a, b) = raw.expect("enrich paths");
+            let path = first_diff(&a, &b, "$".into()).unwrap_or_else(|| "$".into());
+            (ENRICHMENT, path)
+        });
     }
     let path = if a == b {
         "$ (key order)".into()
@@ -509,9 +516,6 @@ pub(crate) fn tee(
         }
         match d {
             None => tracing::info!(route, outcome = "match", "rust shadow"),
-            Some((NODE_WARM_ENRICHMENT, _)) => {
-                tracing::info!(route, outcome = NODE_WARM_ENRICHMENT, "rust shadow")
-            }
             // Expected while Node sits behind the proxy: not a Rust bug.
             Some((field, path)) if htu => {
                 tracing::info!(
@@ -894,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn enrichment_paths_count_node_values_over_rust_nulls_only() {
+    fn enrichment_is_a_labelled_mismatch_that_never_hides_another() {
         const E: Compare = Compare {
             enrich: &["$.projects[*].repositoryIdentity"],
             ..Compare::DEFAULT
@@ -915,7 +919,7 @@ mod tests {
         assert_eq!(d(&p("null", 1), &p("null", 1)), None);
         assert_eq!(
             d(&p(r#"{"a":1}"#, 1), &p("null", 1)).as_deref(),
-            Some("node_warm_enrichment $")
+            Some("enrichment $.projects[0].repositoryIdentity")
         );
         // Anything else differing is still a mismatch, and Rust's value must equal Node's.
         assert_eq!(

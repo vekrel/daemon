@@ -56,6 +56,21 @@ pub fn guard_write(
     mode
 }
 
+/// Routes that may never `serve`.
+/// shortcut: `GET /api/projects` answers Node's cold-cache enrichment (`repositoryIdentity: null`,
+/// the row's `faviconPath`) and cannot see Node's warm cache, so serving it breaks byte parity;
+/// lift this once Rust owns the shell stream's enrichment cache.
+pub const SHADOW_ONLY_KEYS: [&str; 1] = [projects::KEY];
+
+/// `mode` for route `key`, except a shadow-only route configured `serve`: `shadow`.
+pub fn guard_shadow_only(key: &str, mode: crate::config::Mode) -> crate::config::Mode {
+    use crate::config::Mode;
+    if mode == Mode::Serve && SHADOW_ONLY_KEYS.contains(&key) {
+        return Mode::Shadow;
+    }
+    mode
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +88,13 @@ mod tests {
         // Reads are not guarded.
         assert_eq!(guard_write(clients::LIST_KEY, Serve, Shadow), Serve);
         assert_eq!(guard_write("GET /api/auth/session", Serve, Off), Serve);
+    }
+
+    #[test]
+    fn shadow_only_routes_never_serve() {
+        assert_eq!(guard_shadow_only(projects::KEY, Serve), Shadow);
+        assert_eq!(guard_shadow_only(projects::KEY, Shadow), Shadow);
+        assert_eq!(guard_shadow_only(projects::KEY, Off), Off);
+        assert_eq!(guard_shadow_only(clients::LIST_KEY, Serve), Serve);
     }
 }

@@ -138,8 +138,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ];
                 for h in routes {
                     let key = http_seam::key(&*h);
+                    let configured = cfg.rust.mode(&key, h.default_mode());
+                    if handlers::guard_shadow_only(&key, configured) != configured {
+                        tracing::warn!(
+                            route = key,
+                            "{key} runs in shadow: it may not serve until Rust owns Node's enrichment cache"
+                        );
+                        seam = seam.with(config::Mode::Shadow, h);
+                        continue;
+                    }
                     let mode = route_mode(&key, h.default_mode());
-                    if mode != cfg.rust.mode(&key, h.default_mode()) {
+                    if mode != configured {
                         tracing::warn!(
                             route = key,
                             "{key} runs in shadow: subscribeAuthAccess is not serve, and Node's stream would miss Rust's writes"
