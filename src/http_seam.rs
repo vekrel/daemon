@@ -279,7 +279,16 @@ pub fn diff(
         return Some(("body", "$ (formatting)".into()));
     }
     mask(cmp, &mut a, &mut b, "$".into());
-    first_diff(&a, &b, "$".into()).map(|p| ("body", p))
+    // Byte-exact: Value equality ignores key order, and Node's order follows its schema.
+    if serde_json::to_vec(&a).ok() == serde_json::to_vec(&b).ok() {
+        return None;
+    }
+    let path = if a == b {
+        "$ (key order)".into()
+    } else {
+        first_diff(&a, &b, "$".into()).unwrap_or_else(|| "$ (formatting)".into())
+    };
+    Some(("body", path))
 }
 
 /// Nulls the ignored values on both sides and copies Rust's timestamp onto Node's when they are
@@ -785,7 +794,20 @@ mod tests {
         );
         assert_eq!(
             path(r#"{"ticket":"a","b":1}"#, r#"{"b":1,"ticket":"a"}"#).as_deref(),
-            Some(r#"body $ (key 0: node "ticket", rust "b")"#)
+            Some("body $ (key order)")
+        );
+        // Order-only difference deeper down, and an ignored field that differs alone.
+        assert_eq!(
+            path(
+                r#"[{"sessionId":"a","x":1,"y":2}]"#,
+                r#"[{"sessionId":"a","y":2,"x":1}]"#
+            )
+            .as_deref(),
+            Some("body $ (key order)")
+        );
+        assert_eq!(
+            path(r#"{"ticket":"a","b":1}"#, r#"{"ticket":"z","b":1}"#),
+            None
         );
         assert_eq!(
             path(r#"{"ticket":"a"}"#, r#"{"ticket":"a","x":1}"#).as_deref(),
