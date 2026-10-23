@@ -104,8 +104,11 @@ pub struct Writer {
 }
 
 impl Writer {
-    fn serving(&self, req: &Parts) -> bool {
-        self.serve && req.extensions.get::<DpopCtx>().is_some_and(|d| d.serve)
+    /// Whether to write; `None` when the proxy says serve but the route is configured otherwise,
+    /// so only a genuine shadow run returns a prediction.
+    fn serving(&self, req: &Parts) -> Option<bool> {
+        let proxy = req.extensions.get::<DpopCtx>().is_some_and(|d| d.serve);
+        (!proxy || self.serve).then_some(proxy)
     }
 }
 
@@ -231,7 +234,10 @@ impl RouteHandler for CreatePairingToken {
                 return declined(ROUTE, "random");
             };
             let expires_at = iso_millis(now + TTL_MS);
-            if w.serving(req) {
+            let Some(serve) = w.serving(req) else {
+                return declined(ROUTE, "mode_mismatch");
+            };
+            if serve {
                 if let Some(why) = bypassed(&w.access).await {
                     return declined(ROUTE, why);
                 }
@@ -369,7 +375,10 @@ impl RouteHandler for RevokePairingLink {
             }
             let now = now_ms()?;
             let auth = w.auth.clone();
-            let revoked = if w.serving(req) {
+            let Some(serve) = w.serving(req) else {
+                return declined(ROUTE, "mode_mismatch");
+            };
+            let revoked = if serve {
                 if let Some(why) = bypassed(&w.access).await {
                     return declined(ROUTE, why);
                 }
@@ -813,19 +822,44 @@ mod tests {
         assert!(rows(&e)[0][10].is_some() || rows(&e)[1][10].is_some());
     }
 
-    #[tokio::test]
-    async fn only_a_route_configured_serve_writes() {
-        let (e, cookie) = setup(&STANDARD_SCOPES);
-        // The proxy says serve, the route's configured mode does not: a prediction, no row.
-        let r = CreatePairingToken(writer(&e, false))
+    async fn make(w: Writer, cookie: &str, serve: bool) -> Option<Response<Bytes>> {
+        CreatePairingToken(w)
             .handle(
-                &req("POST", CREATE, &cookie, Some("{}"), true),
+                &req("POST", CREATE, cookie, Some("{}"), serve),
                 &HandlerCtx::default(),
             )
             .await
-            .unwrap();
-        assert_eq!(r.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn only_a_route_configured_serve_writes() {
+        let (e, cookie) = setup(&STANDARD_SCOPES);
+        // The proxy says serve, the route's configured mode does not: Node's, nothing stored.
+        assert!(make(writer(&e, false), &cookie, true).await.is_none());
+        let revoke = RevokePairingLink(writer(&e, false))
+            .handle(
+                &req("POST", REVOKE, &cookie, Some(r#"{"id":"x"}"#), true),
+                &HandlerCtx::default(),
+            )
+            .await;
+        assert!(revoke.is_none());
+        // A genuine shadow run predicts; a serve route stores.
+        assert_eq!(
+            make(writer(&e, false), &cookie, false)
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
         assert!(rows(&e).is_empty());
+        assert_eq!(
+            make(writer(&e, true), &cookie, true)
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(rows(&e).len(), 1);
         let keys = [
             http_seam::key(&CreatePairingToken(writer(&e, true))),
             http_seam::key(&RevokePairingLink(writer(&e, true))),
