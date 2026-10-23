@@ -493,7 +493,8 @@ async fn serve_with_unverifiable_credential_defers_to_node() {
     let (logs, _g) = Logs::capture();
     let e = env("defer", r#"["filesystem:read"]"#);
     let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
-    // A wsTicket (even next to a cookie Rust could verify) and a DPoP credential: Node decides.
+    // A ticket Rust rejects (Node accepted it here: a mismatch, so Node decides), even next to a
+    // cookie Rust could verify, and a DPoP credential.
     for (q, h) in [
         ("?wsTicket=abc", ("cookie", cookie(&[]))),
         (
@@ -977,4 +978,43 @@ async fn spaced_frames_are_still_routed_and_pings_pass_through() {
     send(&mut c, ping).await;
     assert_eq!(next_ev(&mut r).await, format!("text:{ping}"));
     barrier(&mut r, &mut c, 4).await;
+}
+
+/// `SessionStore.issueWebSocketToken`'s format, valid for 5 minutes.
+fn ws_ticket() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let json = format!(
+        r#"{{"v":1,"kind":"websocket","sid":"{SID}","iat":{now},"exp":{}}}"#,
+        now + 300_000
+    );
+    let enc = B64.encode(json);
+    let mut mac = Hmac::<Sha256>::new_from_slice(&KEY).unwrap();
+    mac.update(enc.as_bytes());
+    format!("{enc}.{}", B64.encode(mac.finalize().into_bytes()))
+}
+
+#[tokio::test]
+async fn serve_with_ws_ticket_answers_with_row_scopes_and_logs_verdict() {
+    let (logs, _g) = Logs::capture();
+    // The ROW grants filesystem:read (a ticket carries no scopes).
+    let e = env("ticket", r#"["filesystem:read"]"#);
+    let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
+    let q = format!("?wsTicket={}&orchestrationProtocol=2", ws_ticket());
+    let mut c = connect(r.proxy, &q, &[]).await;
+    send(&mut c, &request(1, "test.echo", json!(1))).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(1, r#"{"_tag":"Success","value":1}"#)
+    );
+    barrier(&mut r, &mut c, 2).await;
+    assert!(r.ev.try_recv().is_err(), "upstream saw only the barrier");
+    let v = logs.lines("ws ticket verdict");
+    assert!(
+        v.len() == 1 && v[0].contains("rust=\"verified\" node=101 outcome=\"match\""),
+        "{v:?}"
+    );
+    assert!(logs.lines("deferred_unverifiable_credential").is_empty());
 }

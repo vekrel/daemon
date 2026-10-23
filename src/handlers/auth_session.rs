@@ -1,7 +1,7 @@
 //! `GET /api/auth/session`, byte-compatible with the engine's `MachineAuth.getSessionState`.
 use super::HandlerCtx;
 use crate::{
-    auth::{shadow::AuthFiles, token},
+    auth::{shadow::AuthFiles, ticket, token},
     http_seam::RouteHandler,
 };
 use axum::{
@@ -180,21 +180,24 @@ impl AuthSession {
     }
 
     /// The session Node's `authenticateWebSocketUpgrade` derives, given the headers and query
-    /// Node sees on the proxied upgrade. Node already accepted the socket (it rejects upgrades
-    /// without a valid credential), so anything Rust cannot verify is Rust's blind spot: `Deferred`.
+    /// Node sees on the proxied upgrade. Anything Rust cannot verify is its blind spot: `Deferred`.
     pub async fn ws_session(&self, h: &HeaderMap, query: Option<&str>) -> WsSession {
-        // shortcut: any `wsTicket` key (or a %/+-encoded key that might decode to it) defers, even
-        // when Node would ignore an empty one; deferring is always safe.
-        let ticket = query.is_some_and(|q| {
-            q.split('&')
-                .map(|p| p.split_once('=').map_or(p, |kv| kv.0))
-                .any(|k| k == "wsTicket" || k.contains(['%', '+']))
-        });
+        // A ticket wins over every header, as in Node.
+        match ticket::from_query(query) {
+            ticket::InQuery::Unsure => return WsSession::Deferred,
+            ticket::InQuery::Ticket(t) => {
+                let (files, t) = (self.files.clone(), t.to_owned());
+                return tokio::task::spawn_blocking(move || verify_ticket(&files, &t))
+                    .await
+                    .unwrap_or(WsSession::Deferred);
+            }
+            ticket::InQuery::Absent => {}
+        }
         let dpop = h
             .get_all(header::AUTHORIZATION)
             .iter()
             .any(|v| v.as_bytes().starts_with(b"DPoP "));
-        if ticket || dpop {
+        if dpop {
             return WsSession::Deferred;
         }
         let Some(Cred::Token { token, dpop }) = self.credential(h) else {
@@ -273,7 +276,8 @@ const LEGACY_SCOPES: [&str; 8] = [
     "relay:write",
 ];
 
-/// A session as `SessionStore.verify` returns it: scopes, method and expiry from the token claims.
+/// A verified session: from the token claims for a session token (`SessionStore.verify`), from
+/// the row for a `wsTicket` (`verifyWebSocketToken`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedSession {
     pub scopes: Vec<String>,
@@ -287,9 +291,47 @@ pub struct VerifiedSession {
 pub enum WsSession {
     /// Rust checks each RPC's scope against it; a missing scope is `MachineAuthorizationError`.
     Verified(VerifiedSession),
-    /// Rust cannot evaluate the session Node accepted (`wsTicket`, DPoP, no or rejected
+    /// Rust cannot evaluate the session Node accepted (an unsure `wsTicket`, DPoP, no or rejected
     /// credential, key/DB unreadable, engine config Rust cannot reproduce): Node answers.
     Deferred,
+    /// A `wsTicket` Node must reject (401) for this reason. Rust still forwards the upgrade, so if
+    /// Node accepts it anyway this acts as `Deferred`.
+    Rejected(&'static str),
+}
+
+/// `SessionStore.verifyWebSocketToken` + `rejectMcpClientAudience`, in Node's check order.
+fn verify_ticket(files: &AuthFiles, t: &str) -> WsSession {
+    use WsSession::{Deferred, Rejected};
+    let Some(key) = files.key() else {
+        return Deferred;
+    };
+    let c = match ticket::verify(t, &key) {
+        Ok(c) => c,
+        Err(token::TokenError::BadSignature) => return Rejected("bad_signature"),
+        Err(token::TokenError::Malformed) => return Rejected("malformed"),
+    };
+    // Reusable dev-token sessions stay on Node.
+    if c.sid.starts_with("dev-auth-") {
+        return Deferred;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    if c.exp <= now {
+        return Rejected("ticket_expired");
+    }
+    match files.lookup(&c.sid) {
+        None => Deferred,
+        Some(None) => Rejected("unknown_session"),
+        Some(Some(r)) if r.expires_at_ms <= now => Rejected("session_expired"),
+        Some(Some(r)) if r.revoked_at.is_some() => Rejected("session_revoked"),
+        Some(Some(r)) if r.subject == "mcp-client" => Rejected("mcp_client"),
+        Some(Some(r)) => WsSession::Verified(VerifiedSession {
+            scopes: r.scopes,
+            method: r.method,
+            exp: r.expires_at_ms,
+        }),
+    }
 }
 
 /// `SessionStore.verify` + `rejectMcpClientAudience` + the DPoP checks. `Some(None)`: a

@@ -1,4 +1,5 @@
 use crate::{
+    handlers::auth_session::WsSession,
     proxy_http::{add_forwarded, error, strip_hop_by_hop},
     rpc_seam::{Conn, Fwd, Out},
     server::Upstream,
@@ -91,11 +92,22 @@ pub async fn handler(
     let rpc = ctx.upstream.rpc.clone();
     let session = rpc.session(req.headers(), uri.query()).await;
 
+    let ticket =
+        crate::auth::ticket::from_query(uri.query()) != crate::auth::ticket::InQuery::Absent;
+
     let dial = tokio::time::timeout(ctx.upstream.dial_timeout, connect_async(req));
     let (up, res) = match dial.await {
         Err(_) => return error(StatusCode::GATEWAY_TIMEOUT, "engine_timeout"),
-        Ok(Ok(ok)) => ok,
+        Ok(Ok(ok)) => {
+            if ticket {
+                ticket_verdict(&session, 101);
+            }
+            ok
+        }
         Ok(Err(WsError::Http(res))) => {
+            if ticket {
+                ticket_verdict(&session, res.status().as_u16());
+            }
             let (mut parts, body) = res.into_parts();
             strip_hop_by_hop(&mut parts.headers);
             return Response::from_parts(parts, Body::from(body.unwrap_or_default()));
@@ -115,6 +127,27 @@ pub async fn handler(
         let rpc = Conn::new(rpc, session, done_tx, ctx.upstream.shadow.clone());
         pump(client, up, generation, shutdown, ctx.tap, conn, (rpc, done))
     })
+}
+
+/// Shadow log: Rust's `wsTicket` verdict against Node's handshake status (Node always decides).
+fn ticket_verdict(session: &WsSession, node: u16) {
+    let rust = match session {
+        WsSession::Verified(_) => "verified",
+        WsSession::Rejected(why) => why,
+        WsSession::Deferred => "deferred",
+    };
+    let outcome = match (session, node) {
+        (WsSession::Deferred, _) => "deferred",
+        // 426 (protocol) and 500 come before or beside auth: nothing to compare.
+        (_, n) if n != 101 && n != 401 => "not_compared",
+        (WsSession::Verified(_), 101) | (WsSession::Rejected(_), 401) => "match",
+        _ => "mismatch",
+    };
+    if outcome == "mismatch" {
+        tracing::warn!(rust, node, outcome, "ws ticket verdict");
+    } else {
+        tracing::info!(rust, node, outcome, "ws ticket verdict");
+    }
 }
 
 async fn pump<U>(

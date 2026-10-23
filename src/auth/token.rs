@@ -32,6 +32,16 @@ pub enum TokenError {
 
 /// Signature and claims shape only; expiry and revocation are the caller's (as in `SessionStore.verify`).
 pub fn verify(token: &str, key: &[u8; 32]) -> Result<Payload, TokenError> {
+    let json = signed_json(token, key)?;
+    let p: Payload = serde_json::from_slice(&json).map_err(|_| TokenError::Malformed)?;
+    if p.kind != "session" || !matches!(p.v, 1 | 2) {
+        return Err(TokenError::Malformed);
+    }
+    Ok(p)
+}
+
+/// The claims JSON of a token signed with `key` (session tokens and websocket tickets alike).
+pub(crate) fn signed_json(token: &str, key: &[u8; 32]) -> Result<Vec<u8>, TokenError> {
     // Node does `token.split(".")` and uses the first two parts, so extra dots are ignored.
     let mut parts = token.split('.');
     let (enc, sig) = match (parts.next(), parts.next()) {
@@ -43,14 +53,8 @@ pub fn verify(token: &str, key: &[u8; 32]) -> Result<Payload, TokenError> {
     mac.update(enc.as_bytes());
     mac.verify_slice(&sig)
         .map_err(|_| TokenError::BadSignature)?;
-    let json = B64
-        .decode(enc.trim_end_matches('='))
-        .map_err(|_| TokenError::Malformed)?;
-    let p: Payload = serde_json::from_slice(&json).map_err(|_| TokenError::Malformed)?;
-    if p.kind != "session" || !matches!(p.v, 1 | 2) {
-        return Err(TokenError::Malformed);
-    }
-    Ok(p)
+    B64.decode(enc.trim_end_matches('='))
+        .map_err(|_| TokenError::Malformed)
 }
 
 /// `Buffer.from(s, "base64url")` as `timingSafeEqualBase64Url` uses it: both alphabets, other

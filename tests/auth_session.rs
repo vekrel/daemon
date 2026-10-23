@@ -30,7 +30,7 @@ use vekrel::{
     config::Mode,
     handlers::{
         HandlerCtx,
-        auth_session::{AuthSession, Descriptor},
+        auth_session::{AuthSession, Descriptor, VerifiedSession, WsSession},
     },
     http_seam::{RouteHandler, Seam},
     server,
@@ -637,4 +637,141 @@ async fn shadow_passes_node_body_errors_through() {
     assert!(r.text().await.is_err(), "the body error reaches the client");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(logs.lines().is_empty(), "no comparison on a broken body");
+}
+
+// --- `wsTicket` on `/ws` upgrades (`MachineAuth.authenticateWebSocketUpgrade`,
+// `SessionStore.verifyWebSocketToken`). Scopes, method and expiry come from the ROW.
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// `SessionStore.issueWebSocketToken`: `WebSocketClaims` JSON in schema order, base64url, then
+/// `base64url(HMAC-SHA256(key, encodedPayload))`.
+fn ticket_with(kind: &str, sid: &str, exp: i64, key: &[u8; 32]) -> String {
+    let iat = now_ms();
+    let json = format!(r#"{{"v":1,"kind":"{kind}","sid":"{sid}","iat":{iat},"exp":{exp}}}"#);
+    let enc = B64.encode(json);
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+    mac.update(enc.as_bytes());
+    format!("{enc}.{}", B64.encode(mac.finalize().into_bytes()))
+}
+
+fn ticket() -> String {
+    ticket_with("websocket", SID, now_ms() + 300_000, &KEY)
+}
+
+async fn ws(env: &Env, query: &str) -> WsSession {
+    env.handler()
+        .ws_session(&HeaderMap::new(), Some(query))
+        .await
+}
+
+fn q(t: &str) -> String {
+    format!("wsTicket={t}&orchestrationProtocol=2")
+}
+
+#[tokio::test]
+async fn valid_ticket_verifies_with_row_session() {
+    let e = Env::new(
+        "tk-ok",
+        r#"["orchestration:read","filesystem:read"]"#,
+        "2099-01-01T00:00:00.000Z",
+        None,
+    );
+    assert_eq!(
+        ws(&e, &q(&ticket())).await,
+        WsSession::Verified(VerifiedSession {
+            scopes: vec!["orchestration:read".into(), "filesystem:read".into()],
+            method: "browser-session-cookie".into(),
+            exp: 4_070_908_800_000,
+        })
+    );
+    // Node reads only the ticket: a DPoP header or a bad cookie beside it changes nothing.
+    let mut h = HeaderMap::new();
+    h.insert("authorization", "DPoP x".parse().unwrap());
+    h.insert("cookie", cookie("junk").parse().unwrap());
+    let s = e.handler().ws_session(&h, Some(&q(&ticket()))).await;
+    assert!(matches!(s, WsSession::Verified(_)), "{s:?}");
+}
+
+#[tokio::test]
+async fn bad_tickets_are_rejected_like_node() {
+    let e = Env::ok("tk-bad");
+    let (enc, sig) = ticket()
+        .split_once('.')
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        .unwrap();
+    let mut forged = B64.decode(&enc).unwrap();
+    let n = forged.len();
+    forged[n - 2] = if forged[n - 2] == b'9' { b'8' } else { b'9' }; // another exp digit
+    let cases = [
+        ("expired", ticket_with("websocket", SID, now_ms() - 1, &KEY)),
+        (
+            "wrong kind",
+            ticket_with("session", SID, now_ms() + 300_000, &KEY),
+        ),
+        (
+            "wrong key",
+            ticket_with("websocket", SID, now_ms() + 300_000, &[8; 32]),
+        ),
+        ("tampered", format!("{}.{sig}", B64.encode(forged))),
+        ("no signature", enc.clone()),
+        (
+            "unknown sid",
+            ticket_with("websocket", "nope", now_ms() + 300_000, &KEY),
+        ),
+    ];
+    for (what, t) in cases {
+        let s = ws(&e, &q(&t)).await;
+        assert!(matches!(s, WsSession::Rejected(_)), "{what}: {s:?}");
+    }
+}
+
+#[tokio::test]
+async fn revoked_expired_or_mcp_rows_are_rejected() {
+    let revoked = Env::new(
+        "tk-rev",
+        r#"["a"]"#,
+        "2099-01-01T00:00:00.000Z",
+        Some("2026-01-02T00:00:00.000Z"),
+    );
+    let expired = Env::new("tk-exp", r#"["a"]"#, "2026-01-02T00:00:00.000Z", None);
+    let mcp = Env::new("tk-mcp", r#"["a"]"#, "2099-01-01T00:00:00.000Z", None);
+    rusqlite::Connection::open(mcp.dir.join("statev2.sqlite"))
+        .unwrap()
+        .execute("UPDATE auth_sessions SET subject = 'mcp-client'", [])
+        .unwrap();
+    for (what, e) in [("revoked", revoked), ("expired row", expired), ("mcp", mcp)] {
+        let s = ws(&e, &q(&ticket())).await;
+        assert!(matches!(s, WsSession::Rejected(_)), "{what}: {s:?}");
+    }
+}
+
+#[tokio::test]
+async fn unsure_tickets_defer_to_node() {
+    let e = Env::ok("tk-defer");
+    let t = ticket();
+    let dev = ticket_with("websocket", "dev-auth-x", now_ms() + 300_000, &KEY);
+    for query in [
+        // `URLSearchParams` decodes these; Rust does not reproduce it.
+        format!("wsTicket={}", t.replacen('.', "%2E", 1)),
+        format!("ws%54icket={t}"),
+        format!("wsTicket={t}+"),
+        // `searchParams.get` takes the first; Rust defers rather than pick.
+        format!("wsTicket={t}&wsTicket=x"),
+        // Blank: Node falls back to the cookie/bearer path.
+        "wsTicket=&orchestrationProtocol=2".into(),
+        "wsTicket".into(),
+        q(&dev),
+    ] {
+        assert_eq!(ws(&e, &query).await, WsSession::Deferred, "{query}");
+    }
+    std::fs::remove_file(e.dir.join("statev2.sqlite")).unwrap();
+    assert_eq!(ws(&e, &q(&t)).await, WsSession::Deferred, "db gone");
+    std::fs::remove_file(e.dir.join("secrets/server-signing-key.bin")).unwrap();
+    assert_eq!(ws(&e, &q(&t)).await, WsSession::Deferred, "key gone");
 }

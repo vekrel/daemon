@@ -302,7 +302,8 @@ impl Conn {
         };
         let h = h.clone();
         let session = match &self.session {
-            WsSession::Deferred => {
+            // Rejected: Node accepted a ticket Rust would refuse, so Rust is wrong; Node answers.
+            WsSession::Deferred | WsSession::Rejected(_) => {
                 tracing::info!(
                     tag,
                     outcome = "deferred_unverifiable_credential",

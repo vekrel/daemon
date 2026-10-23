@@ -760,3 +760,113 @@ fn unsupported_engine_flag_defers_served_rpcs_to_node() {
     drop(d);
     assert!(!home.exists());
 }
+
+/// `wsTicket` upgrades: Rust's verdict log must match Node's 101/401, and a readFile on a ticket
+/// socket is served by Rust (`projects.readFile` in serve; not deferred).
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn ws_ticket_verdicts_match_node() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use futures_util::{SinkExt, StreamExt};
+    use hmac::{Hmac, KeyInit, Mac};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+
+    let Some((d, base, home, token)) = start_with("wsticket", |home, cmd| {
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap().replace(
+            "\"projects.readFile\" = \"shadow\"",
+            "\"projects.readFile\" = \"serve\"",
+        );
+        std::fs::write(&cfg, t).unwrap();
+        std::fs::create_dir_all(home.join("ws")).unwrap();
+        std::fs::write(home.join("ws/small.txt"), b"hello\n").unwrap();
+        cmd.current_dir(home.join("ws"));
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let (code, body) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &format!("cookie: {cookie}"),
+        &format!("{base}/api/auth/websocket-ticket"),
+    ]);
+    assert_eq!(code, 200, "{body}");
+    let issued: Value = serde_json::from_str(&body).unwrap();
+    let ticket = issued["ticket"].as_str().unwrap().to_owned();
+
+    // Tampered: a different payload under Node's signature.
+    let (enc, sig) = ticket.split_once('.').unwrap();
+    let mut claims: Value = serde_json::from_slice(&B64.decode(enc).unwrap()).unwrap();
+    claims["exp"] = json!(claims["exp"].as_i64().unwrap() + 1);
+    let tampered = format!("{}.{sig}", B64.encode(claims.to_string()));
+    // Expired: Node exposes no TTL hook, so mint one Node-style with the engine's own key.
+    let key = std::fs::read(home.join("userdata/secrets/server-signing-key.bin")).unwrap();
+    let past = claims["iat"].as_i64().unwrap() - 600_000;
+    let json = format!(
+        r#"{{"v":1,"kind":"websocket","sid":{},"iat":{past},"exp":{}}}"#,
+        claims["sid"],
+        past + 300_000
+    );
+    let enc = B64.encode(json);
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&key).unwrap();
+    mac.update(enc.as_bytes());
+    let expired = format!("{enc}.{}", B64.encode(mac.finalize().into_bytes()));
+
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let ws = home.join("ws").to_string_lossy().into_owned();
+    let url = |t: &str| format!("ws://127.0.0.1:{port}/ws?wsTicket={t}&orchestrationProtocol=2");
+    let exit = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for (what, t) in [("tampered", &tampered), ("expired", &expired)] {
+            match tokio_tungstenite::connect_async(url(t)).await {
+                Err(WsError::Http(r)) => assert_eq!(r.status(), 401, "{what}"),
+                other => panic!("{what}: {:?}", other.map(|_| ())),
+            }
+        }
+        let (mut c, res) = tokio_tungstenite::connect_async(url(&ticket))
+            .await
+            .expect("valid ticket upgrades");
+        assert_eq!(res.status(), 101);
+        let m = json!({"_tag":"Request","id":7,"tag":"projects.readFile",
+            "payload":{"cwd": ws, "relativePath": "small.txt"},"headers":[]});
+        c.send(Message::text(m.to_string())).await.unwrap();
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(20), c.next()).await;
+            let Ok(Some(Ok(Message::Text(t)))) = msg else {
+                panic!("no frame: {msg:?}")
+            };
+            let v: Value = serde_json::from_str(t.as_str()).unwrap();
+            if let Some(m) = v
+                .as_array()
+                .cloned()
+                .unwrap_or(vec![v])
+                .into_iter()
+                .find(|m| m["_tag"] == "Exit" && m["requestId"] == 7)
+            {
+                break m["exit"].clone();
+            }
+        }
+    });
+    println!("readFile on a ticket socket: {exit}");
+    assert_eq!(exit["_tag"], "Success");
+    std::thread::sleep(Duration::from_millis(300));
+    let l = log(&home);
+    let verdicts: Vec<&str> = l
+        .lines()
+        .filter(|l| l.contains("ws ticket verdict"))
+        .collect();
+    for v in &verdicts {
+        println!("{v}");
+    }
+    let has = |s: &str| verdicts.iter().filter(|l| l.contains(s)).count();
+    assert_eq!(verdicts.len(), 3, "{verdicts:?}");
+    assert_eq!(has("outcome=\"match\""), 3, "{verdicts:?}");
+    assert_eq!(has("rust=\"verified\" node=101"), 1);
+    assert_eq!(has("rust=\"bad_signature\" node=401"), 1);
+    assert_eq!(has("rust=\"ticket_expired\" node=401"), 1);
+    assert!(!l.contains("deferred_unverifiable_credential"), "{l}");
+    drop(d);
+    assert!(!home.exists());
+}
