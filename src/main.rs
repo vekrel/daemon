@@ -147,10 +147,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let key = http_seam::key(&*h);
                     let configured = cfg.rust.mode(&key, h.default_mode());
                     if handlers::guard_shadow_only(&key, configured) != configured {
-                        tracing::warn!(
-                            route = key,
-                            "{key} runs in shadow: it may not serve until Rust owns Node's enrichment cache"
-                        );
+                        let why = handlers::shadow_only_reason(&key).unwrap_or_default();
+                        tracing::warn!(route = key, "{key} runs in shadow: {why}");
                         seam = seam.with(config::Mode::Shadow, h);
                         continue;
                     }

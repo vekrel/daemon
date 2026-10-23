@@ -67,8 +67,11 @@ fn start(tag: &str) -> Option<(Daemon, String, PathBuf, String)> {
     start_with(tag, |_, _| {})
 }
 
-/// Plan 5's handlers default to `serve`; these tests start them in `shadow` unless `prep` says otherwise.
-const PLAN5_KEYS: [&str; 11] = [
+/// Handlers that default to `serve` (plan 5's and plan 6B's proven reads); these tests start them
+/// in `shadow` unless `prep` says otherwise.
+const PLAN5_KEYS: [&str; 13] = [
+    "orchestration.searchThreads",
+    "orchestration.getTurnItem",
     "POST /api/auth/websocket-ticket",
     "GET /ws dpop",
     "subscribeAuthAccess",
@@ -168,6 +171,19 @@ fn declined(home: &Path, route: &str) -> usize {
         .count()
 }
 
+/// `shadow_counts` once at least `n` comparisons for `route` are logged (each is logged after
+/// Node's answer reached the client, so a loaded machine may log late), or after 60 s.
+fn shadow_counts_at_least(home: &Path, route: &str, n: usize) -> (usize, usize) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (m, mm) = shadow_counts(home, route);
+        if m + mm >= n || Instant::now() > deadline {
+            return (m, mm);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 /// (matches, mismatches) among the shadow log lines for `route`, declines excluded; prints
 /// mismatching lines.
 fn shadow_counts(home: &Path, route: &str) -> (usize, usize) {
@@ -223,7 +239,8 @@ fn machine_descriptor_shadow_matches_node() {
     let (_, body) = curl(&[&url]);
     assert!(body.contains(r#""agentActivityPublishing":true"#), "{body}");
     get(9);
-    let (matches, mismatches) = shadow_counts(&home, "GET /.well-known/vekrel/machine");
+    let (matches, mismatches) =
+        shadow_counts_at_least(&home, "GET /.well-known/vekrel/machine", 20);
     println!("machine shadow log: {matches} match, {mismatches} mismatch");
     assert_eq!(mismatches, 0);
     assert_eq!(matches, 20, "every request compared");

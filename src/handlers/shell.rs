@@ -5,7 +5,7 @@
 //! `GET /api/projects`), the Task 6 builder's active threads and `latestApplicationSequence`.
 //! Every builder decline and every project row Rust cannot reproduce declines the request.
 //!
-//! Shadow-only (`SHADOW_ONLY_KEYS`): Node's `enrichProjectShells` fills `repositoryIdentity` from
+//! Shadow-only (`SHADOW_ONLY`): Node's `enrichProjectShells` fills `repositoryIdentity` from
 //! its warm in-memory cache, and the client renders the HTTP snapshot before the stream's
 //! enrichment refresh arrives (Vekrel-Web `client-runtime/src/state/shell.ts` `applyItems` on the
 //! HTTP snapshot, then `subscribeShell`), so Rust's cold `null` is visible.

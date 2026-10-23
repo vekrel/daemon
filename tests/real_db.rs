@@ -133,12 +133,54 @@ fn digest(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
-/// Every turn item of the owner's DB through Rust's `getTurnItem` (what serve would answer):
-/// every legacy thread's item declines before its row is read, and the copy (and its WAL) is
-/// byte-identical afterwards.
+/// SHA-256 per table of every row in rowid order (`WITHOUT ROWID` tables in key order), each
+/// value tagged with its SQLite type: equal dumps mean equal logical content, whatever the pages.
+fn logical_dump(c: &rusqlite::Connection) -> Vec<(String, Vec<u8>)> {
+    use rusqlite::types::ValueRef;
+    use sha2::Digest;
+    let tables: Vec<(String, bool)> = c
+        .prepare("SELECT name, sql LIKE '%WITHOUT ROWID%' FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    tables
+        .into_iter()
+        .map(|(t, no_rowid)| {
+            let order = if no_rowid { "" } else { " ORDER BY rowid" };
+            let mut q = c.prepare(&format!("SELECT * FROM \"{t}\"{order}")).unwrap();
+            let n = q.column_count();
+            let mut h = sha2::Sha256::new();
+            let mut rows = q.query([]).unwrap();
+            while let Some(r) = rows.next().unwrap() {
+                for i in 0..n {
+                    match r.get_ref(i).unwrap() {
+                        ValueRef::Null => h.update(b"n"),
+                        ValueRef::Integer(v) => {
+                            h.update([b"i".as_slice(), &v.to_le_bytes()].concat())
+                        }
+                        ValueRef::Real(v) => h.update([b"r".as_slice(), &v.to_le_bytes()].concat()),
+                        ValueRef::Text(v) | ValueRef::Blob(v) => {
+                            h.update((v.len() as u64).to_le_bytes());
+                            h.update(v);
+                        }
+                    }
+                }
+                h.update(b"\n");
+            }
+            (t, h.finalize().to_vec())
+        })
+        .collect()
+}
+
+/// Every turn item of the owner's DB through Rust's `getTurnItem`, and thread searches built from
+/// its titles through `searchThreads` (what serve answers): every legacy thread's item declines
+/// before its row is read, and the copy (and its WAL) is byte-identical and has the same logical
+/// dump afterwards.
 #[test]
 fn owner_db_turn_items_decline_legacy_threads_and_write_nothing() {
-    use vekrel::handlers::turn_item::get_turn_item;
+    use vekrel::handlers::{thread_search::search, turn_item::get_turn_item};
     let Some(path) = real_db() else {
         return;
     };
@@ -151,6 +193,16 @@ fn owner_db_turn_items_decline_legacy_threads_and_write_nothing() {
     })
     .unwrap();
     let before: Vec<_> = files.iter().map(|f| digest(f)).collect();
+    let dump_before = logical_dump(&c);
+    let titles: Vec<String> = c
+        .prepare(
+            "SELECT title FROM orchestration_v2_projection_threads ORDER BY thread_id LIMIT 200",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
     let rows: Vec<(String, String, bool)> = c
         .prepare(
             "SELECT thread_id, turn_item_id, thread_id IN \
@@ -191,6 +243,26 @@ fn owner_db_turn_items_decline_legacy_threads_and_write_nothing() {
     );
     assert_eq!(outcomes.get("legacy_thread").copied().unwrap_or(0), legacy);
     assert!(outcomes.get("served").copied().unwrap_or(0) > 0);
+    let mut hits = 0;
+    for t in &titles {
+        let q: String = t.chars().take(12).collect();
+        if let Some(v) = search(&db, &serde_json::json!({"query": q})) {
+            hits += usize::from(!v["matches"].as_array().is_none_or(Vec::is_empty));
+        }
+    }
+    println!(
+        "owner DB searchThreads: {} queries, {hits} with hits",
+        titles.len()
+    );
+    assert!(hits > 0);
+    drop(db);
     let after: Vec<_> = files.iter().map(|f| digest(f)).collect();
     assert_eq!(before, after, "the copy is byte-identical after the run");
+    let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    assert_eq!(
+        dump_before,
+        logical_dump(&c),
+        "the copy's logical dump is unchanged"
+    );
 }

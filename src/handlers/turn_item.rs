@@ -35,6 +35,9 @@ pub struct TurnItem {
 }
 
 impl UnaryHandler for TurnItem {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
     fn tag(&self) -> &'static str {
         TAG
     }

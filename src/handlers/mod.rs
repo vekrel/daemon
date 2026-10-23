@@ -59,17 +59,33 @@ pub fn guard_write(
     mode
 }
 
-/// Routes that may never `serve`.
-/// shortcut: `GET /api/projects`, `orchestration.getArchivedShellSnapshot` and
-/// `GET /api/orchestration/shell` answer Node's cold-cache enrichment (`repositoryIdentity: null`,
-/// and for projects the row's `faviconPath`) and cannot see Node's warm cache, so serving them
-/// breaks byte parity; lift this once Rust owns the shell stream's enrichment cache.
-pub const SHADOW_ONLY_KEYS: [&str; 3] = [projects::KEY, archived_shell::TAG, shell::KEY];
+/// Routes that may never `serve`, with the reason the startup warning gives.
+/// shortcut: these answer Node's cold-cache enrichment and cannot see Node's warm cache, so
+/// serving them breaks byte parity; lift this once Rust owns the shell stream's enrichment cache.
+pub const SHADOW_ONLY: [(&str, &str); 3] = [
+    (
+        projects::KEY,
+        "Node fills repositoryIdentity and faviconPath from its warm enrichment cache, which Rust \
+         cannot see (Rust answers the cold null and the row's faviconPath); it may serve once Rust \
+         owns that cache",
+    ),
+    (archived_shell::TAG, SHELL_REASON),
+    (shell::KEY, SHELL_REASON),
+];
+
+const SHELL_REASON: &str = "Node fills projects[*].repositoryIdentity from its warm enrichment \
+     cache, which Rust cannot see (Rust answers the cold null); it may serve once Rust owns that \
+     cache";
+
+/// Why `key` may not serve, when it is shadow-only.
+pub fn shadow_only_reason(key: &str) -> Option<&'static str> {
+    SHADOW_ONLY.iter().find(|(k, _)| *k == key).map(|(_, r)| *r)
+}
 
 /// `mode` for route `key`, except a shadow-only route configured `serve`: `shadow`.
 pub fn guard_shadow_only(key: &str, mode: crate::config::Mode) -> crate::config::Mode {
     use crate::config::Mode;
-    if mode == Mode::Serve && SHADOW_ONLY_KEYS.contains(&key) {
+    if mode == Mode::Serve && shadow_only_reason(key).is_some() {
         return Mode::Shadow;
     }
     mode
@@ -102,5 +118,27 @@ mod tests {
         assert_eq!(guard_shadow_only(archived_shell::TAG, Serve), Shadow);
         assert_eq!(guard_shadow_only(shell::KEY, Serve), Shadow);
         assert_eq!(guard_shadow_only(clients::LIST_KEY, Serve), Serve);
+        for (key, _) in SHADOW_ONLY {
+            assert!(
+                shadow_only_reason(key)
+                    .unwrap()
+                    .contains("enrichment cache"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn proven_6b_reads_serve_by_default() {
+        use crate::rpc_seam::UnaryHandler;
+        assert_eq!(
+            thread_search::SearchThreads::default().default_mode(),
+            Serve
+        );
+        assert_eq!(turn_item::TurnItem::default().default_mode(), Serve);
+        assert_eq!(
+            archived_shell::ArchivedShell::default().default_mode(),
+            Shadow
+        );
     }
 }

@@ -23,6 +23,9 @@ pub struct SearchThreads {
 }
 
 impl UnaryHandler for SearchThreads {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
     fn tag(&self) -> &'static str {
         "orchestration.searchThreads"
     }

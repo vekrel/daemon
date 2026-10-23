@@ -5,7 +5,7 @@
 //! `latestApplicationSequence`; the body is `OrchestrationV2ArchivedShellSnapshot`
 //! `{schemaVersion, snapshotSequence, projects, threads}`. Node then fills
 //! `projects[*].repositoryIdentity` from its warm enrichment cache (`enrichProjectShells`); Rust
-//! answers the cold `null`, so this tag is shadow-only (`handlers::SHADOW_ONLY_KEYS`).
+//! answers the cold `null`, so this tag is shadow-only (`handlers::SHADOW_ONLY`).
 //!
 //! Declines (Node answers), logged with a reason: a payload that is not an object, any builder
 //! decline (`shell::Decline::reason`), a project row Rust cannot reproduce

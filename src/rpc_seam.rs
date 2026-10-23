@@ -154,12 +154,11 @@ impl Seam {
         let handlers = handlers.into_iter().map(|h| {
             let configured = cfg.mode(h.tag(), h.default_mode());
             let mode = crate::handlers::guard_shadow_only(h.tag(), configured);
-            if mode != configured {
-                tracing::warn!(
-                    tag = h.tag(),
-                    "{} runs in shadow: it may not serve until Rust owns Node's enrichment cache",
-                    h.tag()
-                );
+            if let (true, Some(why)) = (
+                mode != configured,
+                crate::handlers::shadow_only_reason(h.tag()),
+            ) {
+                tracing::warn!(tag = h.tag(), "{} runs in shadow: {why}", h.tag());
             }
             (h, mode)
         });
