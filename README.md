@@ -20,16 +20,27 @@ port = 3773        # public port
 command = "node"
 args = ["/abs/path/apps/server/dist/bin.mjs"]
 # port = 3783      # loopback only; defaults to server.port + 10
-[rust.handlers]    # optional; every handler defaults to "shadow"
-"GET /api/auth/session" = "shadow"   # off | shadow | serve
-"GET /.well-known/vekrel/machine" = "shadow"
-"projects.readFile" = "shadow"
-"filesystem.browse" = "shadow"
+[rust.handlers]    # optional; every handler defaults to "serve"
+"GET /api/auth/session" = "serve"   # off | shadow | serve
+"GET /.well-known/vekrel/machine" = "serve"
+"projects.readFile" = "serve"
+"filesystem.browse" = "serve"
 ```
 
-Rust handlers: in `shadow` the engine answers, and the daemon compares its own answer (status, `content-type`, body bytes; bodies over 1 MiB are skipped) and logs `rust shadow` with `outcome="match"` or `outcome="mismatch"` plus the first differing JSON path (never values). In `serve` the daemon answers with `x-vekrel-served-by: rust` and the engine never sees the request. Requests a handler cannot answer exactly (legacy cookie, DPoP proof, unreadable key or DB, a missing `machine-id`) always go to the engine. The machine handler is disabled at startup unless the engine runs as `node <script>` from a plain checkout (no npm/npx/pnpm/bun install, no `VEKREL_NPM_LAUNCHER_PATH`), because Node adds install capabilities otherwise.
+Rust handlers: in `shadow` the engine answers, and the daemon compares its own answer (status, `content-type`, body bytes after undoing the engine's `br`/`gzip`/`deflate` encoding; bodies over 1 MiB are skipped) and logs `rust shadow` with `outcome="match"` or `outcome="mismatch"` plus the first differing JSON path (never values). In `serve` the daemon answers with `x-vekrel-served-by: rust` and the engine never sees the request. Requests a handler cannot answer exactly (legacy cookie, DPoP proof, unreadable key or DB, a missing `machine-id`) always go to the engine. The machine handler is disabled at startup unless the engine runs as `node <script>` from a plain checkout (no npm/npx/pnpm/bun install, no `VEKREL_NPM_LAUNCHER_PATH`), because Node adds install capabilities otherwise.
 
-WS RPC handlers are keyed by tag (e.g. `"projects.readFile"`). In `serve` the daemon answers the `Request` itself and checks the tag's scope against the token scopes of the session on the `/ws` upgrade (cookie or Bearer). If the session is missing or unverifiable, the client gets `MachineAuthorizationError`. Connections that use `?wsTicket=` or DPoP go to the engine (logged `deferred_unverifiable_credential`). When the engine runs with a config the daemon cannot reproduce (dev auth, dev URL, `--mode`/`--host`/`--base-dir`), no session verifies, so `serve` denies every claimed RPC. Use `shadow` or `off` there. In `shadow` the engine answers, and the daemon compares its `Exit` with the engine's. Every other frame is forwarded byte for byte. At most 64 shadow computations (HTTP and WS together) run at once, each with a 10 s limit. When the limit is full, the comparison is skipped and logged as `shadow_skipped_busy`. A handler may decline a request it cannot answer exactly: `serve` then forwards the client's request to the engine, and `shadow` logs `outcome="declined"`. `filesystem.browse` declines every engine error, paths relative to the engine's cwd, and directories with names outside the code points where its ICU4X collation was checked against Node's `localeCompare` (e.g. Han). It is disabled when `LC_ALL`/`LC_MESSAGES`/`LANG` selects a non-English locale.
+WS RPC handlers are keyed by tag (e.g. `"projects.readFile"`). In `serve` the daemon answers the `Request` itself and checks the tag's scope against the token scopes of the session on the `/ws` upgrade (cookie or Bearer). If the session is missing or unverifiable, the client gets `MachineAuthorizationError`. Connections that use `?wsTicket=` or DPoP go to the engine (logged `deferred_unverifiable_credential`). When the engine runs with a config the daemon cannot reproduce (dev auth, dev URL, `--mode`/`--host`/`--base-dir`), no session verifies, so `serve` denies every claimed RPC. Use `shadow` or `off` there. In `shadow` the engine answers, and the daemon compares its `Exit` with the engine's. Every other frame is forwarded byte for byte. At most 64 shadow computations (HTTP and WS together) run at once, each with a 10 s limit. When the limit is full, the comparison is skipped and logged as `shadow_skipped_busy`. A handler may decline a request it cannot answer exactly: `serve` then forwards the client's request to the engine, and both log `rust handler declined` with `mode` and `outcome="declined"`. `filesystem.browse` declines every engine error, paths relative to the engine's cwd, and directories with names outside the code points where its ICU4X collation was checked against Node's `localeCompare` (e.g. Han). It is disabled when `LC_ALL`/`LC_MESSAGES`/`LANG` selects a non-English locale, a BCP-47 form other than plain `en-<region>` (extensions such as `en-u-kn-true` change Node's sort), or a POSIX `@modifier`.
+
+### What Rust answers today
+
+| Route / tag | Default | When it declines to Node |
+|---|---|---|
+| `GET /.well-known/vekrel/machine` | `serve` | Handler disabled at startup when the engine is not `node <script>` from a plain checkout (npm/npx/pnpm/bun install, `VEKREL_NPM_LAUNCHER_PATH`, `--mode`/`--host`/`--base-dir`/dev settings, unreadable `package.json`). Per request: `<VEKREL_HOME>/userdata/machine-id` missing or empty. |
+| `GET /api/auth/session` | `serve` | Legacy `t3_session` cookie, DPoP-bound token sent as DPoP, signing key or DB unreadable, `%` in the token, non-ASCII header values, an `Origin` it cannot parse exactly. Disabled for engine configs it cannot reproduce (as above). |
+| `projects.readFile` | `serve` | Payloads Node rejects with a `Die` (blank or missing `cwd`/`relativePath`, over 512 UTF-16 units, wrong types), errors with an errno outside its table or no OS code (e.g. a NUL in the path). No verified session with `filesystem:read`: answers `MachineAuthorizationError` itself. |
+| `filesystem.browse` | `serve` | Every engine error (missing parent, `ENOTDIR`, Windows or cwd-relative paths), non-UTF-8 names or names with JS-trimmable edge whitespace, any name outside the collation-checked code points (e.g. Han), `$HOME` unset, non-root locale (see above). Same scope rule as `readFile`. |
+
+In `serve` Rust sends JSON uncompressed; the engine would brotli/gzip bodies of 1 KiB and up (the machine descriptor) when the client accepts it. Set a key to `shadow` to compare against the engine again, or `off` to leave it to Node.
 
 ## Run
 
@@ -47,7 +58,7 @@ Build the engine bundle and a web UI, then smoke the front door:
 scripts/smoke.sh ../Vekrel-Engine ../Vekrel-Web   # or ENGINE_DIR=... WEB_DIR=... PORT=3779
 ```
 
-The script copies `Vekrel-Web/apps/web/dist` into the engine, starts `vekrel serve --record` with a temporary `VEKREL_HOME`, checks `/healthz` and `/.well-known/vekrel/machine` through the public port, then stops the daemon and deletes the temporary state.
+The script copies `Vekrel-Web/apps/web/dist` into the engine, starts `vekrel serve --record` with a temporary `VEKREL_HOME`, checks `/healthz` and `/.well-known/vekrel/machine` through the public port, pairs with the engine's token and asserts that `/.well-known/vekrel/machine` and `/api/auth/session` (with the paired cookie) carry `x-vekrel-served-by: rust`, then stops the daemon and deletes the temporary state.
 
 For a browser session, run `vekrel serve` yourself with a config like the one in the script. The engine logs a pairing URL with its own loopback port (`public + 10`). Replace that port with the public port before you open it so the browser goes through the proxy. With `--record`, frames are written to `$VEKREL_HOME/recordings/`. Those files contain session tokens, so never commit them.
 

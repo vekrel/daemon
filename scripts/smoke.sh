@@ -58,4 +58,21 @@ if [ "$code" != 200 ] || ! grep -q '"engine":"up"' <<<"$health"; then
   tail -20 "$VEKREL_HOME/serve.log" | sed -E 's/token=[^ ]*/token=<redacted>/' >&2
   exit 1
 fi
+
+# Handlers default to serve: Rust answers these, marked by x-vekrel-served-by. Pair first (the
+# engine prints a one-time token) so /api/auth/session is checked with a verified cookie.
+URL="http://127.0.0.1:$PORT"
+served_by() { curl -s -D - -o /dev/null "$@" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-vekrel-served-by"{print $2}'; }
+token=$(grep -o '#token=[A-Za-z0-9_-]*' "$VEKREL_HOME/serve.log" | head -1 | cut -d= -f2)
+pair=$(curl -s -o /dev/null -w '%{http_code}' -c "$VEKREL_HOME/jar" -X POST -H 'content-type: application/json' \
+  -d "{\"credential\":\"$token\"}" "$URL/api/auth/browser-session" || true)
+session=$(curl -s -b "$VEKREL_HOME/jar" "$URL/api/auth/session" || true)
+machine_by=$(served_by "$URL/.well-known/vekrel/machine")
+session_by=$(served_by -b "$VEKREL_HOME/jar" "$URL/api/auth/session")
+echo "pairing: $pair; machine served by: ${machine_by:-node}; session served by: ${session_by:-node}"
+if [ "$pair" != 200 ] || [ "$machine_by" != rust ] || [ "$session_by" != rust ] \
+  || ! grep -q '"authenticated":true' <<<"$session"; then
+  echo "FAIL: expected both routes answered by rust with a verified session" >&2
+  exit 1
+fi
 echo "PASS"
