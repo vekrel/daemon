@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let h: Arc<dyn RouteHandler> = auth.clone();
                 let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
                 seam = seam.with(mode, h);
-                // Without it (unsupported engine config) WS sessions are unverified: serve denies.
+                // Without it (unsupported engine config) WS sessions are deferred: serve forwards to Node.
                 rpc = rpc.with_auth(auth);
             }
         }
