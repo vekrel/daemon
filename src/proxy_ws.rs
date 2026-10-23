@@ -113,7 +113,14 @@ pub async fn handler(
             return Response::from_parts(parts, Body::from(body.unwrap_or_default()));
         }
         Ok(Err(e)) => {
-            tracing::warn!("engine ws dial failed: {e}");
+            // Never log `e` itself: tungstenite's UnableToConnect embeds the URL, which can carry a wsTicket.
+            let kind = match &e {
+                WsError::Url(_) => "url",
+                WsError::Io(_) => "io",
+                WsError::Protocol(_) => "protocol",
+                _ => "other",
+            };
+            tracing::warn!(kind, "engine ws dial failed");
             return error(StatusCode::BAD_GATEWAY, "engine_unreachable");
         }
     };
