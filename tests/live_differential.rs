@@ -1927,6 +1927,34 @@ fn pairing_links_shadow_matches_and_serve_writes_like_node() {
         rows_b.join("\n")
     );
     assert_eq!(rows_a, rows_b, "auth_pairing_links differ");
+    // A cloud link means Node's own stream may have clients: serve hands the writes to Node.
+    std::fs::write(home_b.join("userdata/secrets/cloud-relay-url.bin"), "x").unwrap();
+    let (code, rust, l) = call(
+        &base_b,
+        &watcher,
+        "POST",
+        "/api/auth/pairing-token",
+        Some(r#"{"label":"Via Node"}"#),
+    );
+    assert_eq!((code, rust), (200, false), "{l}");
+    let body = serde_json::json!({ "id": l["id"] }).to_string();
+    let (code, rust, r) = call(
+        &base_b,
+        &watcher,
+        "POST",
+        "/api/auth/pairing-links/revoke",
+        Some(&body),
+    );
+    assert_eq!(
+        (code, rust, &r),
+        (200, false, &serde_json::json!({"revoked": true}))
+    );
+    let logged = log(&home_b);
+    assert_eq!(
+        logged.matches(r#"why="cloud_link""#).count(),
+        2,
+        "both writes declined for the cloud link"
+    );
     drop((da, db));
     assert!(!home_a.exists() && !home_b.exists());
 }

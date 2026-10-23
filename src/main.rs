@@ -100,12 +100,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rpc.registry().clone(),
                     tailscale,
                 ));
+                // Writers store only when their route is configured `serve`.
+                let writer = |key: &str| pairing_links::Writer {
+                    auth: auth.clone(),
+                    access: access.clone(),
+                    serve: cfg.rust.mode(key, config::Mode::Shadow) == config::Mode::Serve,
+                };
                 let routes: [Arc<dyn RouteHandler>; 7] = [
                     auth.clone(),
                     Arc::new(ws_ticket::WsTicket(auth.clone())),
-                    Arc::new(pairing_links::CreatePairingToken(auth.clone())),
+                    Arc::new(pairing_links::CreatePairingToken(writer(
+                        pairing_links::CREATE_KEY,
+                    ))),
                     Arc::new(pairing_links::ListPairingLinks(auth.clone())),
-                    Arc::new(pairing_links::RevokePairingLink(auth.clone())),
+                    Arc::new(pairing_links::RevokePairingLink(writer(
+                        pairing_links::REVOKE_KEY,
+                    ))),
                     Arc::new(pairing::BrowserSession(auth.clone(), access.clone())),
                     Arc::new(pairing::Token(auth.clone(), access.clone())),
                 ];

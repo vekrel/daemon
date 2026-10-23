@@ -4,10 +4,11 @@
 //!
 //! Create and revoke write `auth_pairing_links` only in `serve` (one statement each, as Node's
 //! repository does); in `shadow` they predict Node's answer without writing. Rust's
-//! `subscribeAuthAccess` sees Rust's writes through `data_version`; Node's own stream does not.
+//! `subscribeAuthAccess` sees Rust's writes through `data_version`; Node's own stream does not,
+//! so while a socket may bypass the daemon (`auth::bypass`) the writes stay Node's.
 use super::{
     HandlerCtx,
-    auth_access::{SCOPES, open_db, read_links},
+    auth_access::{AuthAccess, SCOPES, open_db, read_links},
     auth_session::{AuthSession, iso_millis},
 };
 use crate::{
@@ -93,9 +94,23 @@ fn now_ms() -> Option<i64> {
     )
 }
 
-fn serving(req: &Parts) -> bool {
-    req.extensions.get::<DpopCtx>().is_some_and(|d| d.serve)
+/// What a writer needs besides the session: whether its route is configured `serve` (and the
+/// proxy says so too), and whether Node's own stream may have clients.
+pub struct Writer {
+    pub auth: Arc<AuthSession>,
+    /// Asked only for its bypass check.
+    pub access: Arc<AuthAccess>,
+    pub serve: bool,
 }
+
+impl Writer {
+    fn serving(&self, req: &Parts) -> bool {
+        self.serve && req.extensions.get::<DpopCtx>().is_some_and(|d| d.serve)
+    }
+}
+
+pub const CREATE_KEY: &str = "POST /api/auth/pairing-token";
+pub const REVOKE_KEY: &str = "POST /api/auth/pairing-links/revoke";
 
 /// The middleware's principal, or its 401; `None` for callers Node keeps (dev-token sessions too).
 async fn caller(auth: &AuthSession, req: &Parts) -> Option<Result<Principal, Response<Bytes>>> {
@@ -138,12 +153,20 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Option<T> + Send + 'sta
     tokio::task::spawn_blocking(f).await.ok().flatten()
 }
 
+/// `AuthAccess::bypass` off the async threads (it touches the filesystem).
+async fn bypassed(a: &Arc<AuthAccess>) -> Option<&'static str> {
+    let a = a.clone();
+    blocking(move || Some(a.bypass()))
+        .await
+        .unwrap_or(Some("bypass_check_failed"))
+}
+
 fn declined(route: &str, why: &str) -> Option<Response<Bytes>> {
     tracing::info!(route, why, outcome = "declined", "rust pairing links");
     None
 }
 
-pub struct CreatePairingToken(pub Arc<AuthSession>);
+pub struct CreatePairingToken(pub Writer);
 
 impl RouteHandler for CreatePairingToken {
     fn method_path(&self) -> (Method, &'static str) {
@@ -168,8 +191,9 @@ impl RouteHandler for CreatePairingToken {
         _ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Response<Bytes>>> {
         async move {
-            const ROUTE: &str = "POST /api/auth/pairing-token";
-            let p = match caller(&self.0, req).await? {
+            const ROUTE: &str = CREATE_KEY;
+            let w = &self.0;
+            let p = match caller(&w.auth, req).await? {
                 Ok(p) => p,
                 Err(r) => return Some(r),
             };
@@ -207,9 +231,12 @@ impl RouteHandler for CreatePairingToken {
                 return declined(ROUTE, "random");
             };
             let expires_at = iso_millis(now + TTL_MS);
-            if serving(req) {
+            if w.serving(req) {
+                if let Some(why) = bypassed(&w.access).await {
+                    return declined(ROUTE, why);
+                }
                 let (auth, id, credential, label, expires_at) = (
-                    self.0.clone(),
+                    w.auth.clone(),
                     id.clone(),
                     credential.clone(),
                     label.clone(),
@@ -303,7 +330,7 @@ impl RouteHandler for ListPairingLinks {
     }
 }
 
-pub struct RevokePairingLink(pub Arc<AuthSession>);
+pub struct RevokePairingLink(pub Writer);
 
 impl RouteHandler for RevokePairingLink {
     fn method_path(&self) -> (Method, &'static str) {
@@ -327,8 +354,9 @@ impl RouteHandler for RevokePairingLink {
         _ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Response<Bytes>>> {
         async move {
-            const ROUTE: &str = "POST /api/auth/pairing-links/revoke";
-            let p = match caller(&self.0, req).await? {
+            const ROUTE: &str = REVOKE_KEY;
+            let w = &self.0;
+            let p = match caller(&w.auth, req).await? {
                 Ok(p) => p,
                 Err(r) => return Some(r),
             };
@@ -340,8 +368,11 @@ impl RouteHandler for RevokePairingLink {
                 return Some(r);
             }
             let now = now_ms()?;
-            let auth = self.0.clone();
-            let revoked = if serving(req) {
+            let auth = w.auth.clone();
+            let revoked = if w.serving(req) {
+                if let Some(why) = bypassed(&w.access).await {
+                    return declined(ROUTE, why);
+                }
                 blocking(move || {
                     let c = write_db(&auth).ok()?;
                     c.query_row(
@@ -437,6 +468,15 @@ mod tests {
         parts
     }
 
+    fn writer(e: &Env, serve: bool) -> Writer {
+        let files = e.1.files().clone();
+        Writer {
+            auth: e.1.clone(),
+            access: Arc::new(AuthAccess::new(files, Arc::default(), false)),
+            serve,
+        }
+    }
+
     fn rows(e: &Env) -> Vec<Vec<Option<String>>> {
         let c = Connection::open(e.0.path().join("db.sqlite")).unwrap();
         let mut q = c
@@ -452,7 +492,7 @@ mod tests {
     }
 
     async fn create(e: &Env, cookie: &str, body: &str, serve: bool) -> Option<Response<Bytes>> {
-        CreatePairingToken(e.1.clone())
+        CreatePairingToken(writer(e, true))
             .handle(
                 &req("POST", CREATE, cookie, Some(body), serve),
                 &HandlerCtx::default(),
@@ -462,7 +502,7 @@ mod tests {
 
     async fn revoke(e: &Env, cookie: &str, id: &str, serve: bool) -> Option<Response<Bytes>> {
         let body = json!({ "id": id }).to_string();
-        RevokePairingLink(e.1.clone())
+        RevokePairingLink(writer(e, true))
             .handle(
                 &req("POST", REVOKE, cookie, Some(&body), serve),
                 &HandlerCtx::default(),
@@ -615,7 +655,7 @@ mod tests {
         ] {
             assert!(create(&e, &cookie, b, true).await.is_none(), "{b}");
         }
-        let r = RevokePairingLink(e.1.clone())
+        let r = RevokePairingLink(writer(&e, true))
             .handle(
                 &req("POST", REVOKE, &cookie, Some(r#"{"id":" "}"#), true),
                 &HandlerCtx::default(),
@@ -740,5 +780,56 @@ mod tests {
         let (e2, reader) = setup(&["access:read"]);
         let r = revoke(&e2, &reader, "open", true).await.unwrap();
         assert_eq!(r.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn writes_go_to_node_while_a_socket_may_bypass_the_daemon() {
+        let (e, cookie) = setup(&STANDARD_SCOPES);
+        let c = Connection::open(e.0.path().join("db.sqlite")).unwrap();
+        c.execute(
+            "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at)
+             VALUES ('open', 'x1', 'one-time-token', '[]', 's', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let cloud = e.0.path().join("cloud-relay-url.bin");
+        std::fs::write(&cloud, "x").unwrap();
+        assert!(create(&e, &cookie, "{}", true).await.is_none());
+        assert!(revoke(&e, &cookie, "open", true).await.is_none());
+        assert_eq!(rows(&e).len(), 1);
+        assert_eq!(rows(&e)[0][10], None, "no Rust write");
+        // Errors write nothing, so Rust still answers them.
+        let r = create(&e, &cookie, r#"{"scopes":[]}"#, true).await.unwrap();
+        assert_eq!(r.status(), 400);
+        // Shadow predictions write nothing either.
+        assert!(create(&e, &cookie, "{}", false).await.is_some());
+        std::fs::remove_file(&cloud).unwrap();
+        assert_eq!(create(&e, &cookie, "{}", true).await.unwrap().status(), 200);
+        assert_eq!(
+            revoke(&e, &cookie, "open", true).await.unwrap().status(),
+            200
+        );
+        assert_eq!(rows(&e).len(), 2);
+        assert!(rows(&e)[0][10].is_some() || rows(&e)[1][10].is_some());
+    }
+
+    #[tokio::test]
+    async fn only_a_route_configured_serve_writes() {
+        let (e, cookie) = setup(&STANDARD_SCOPES);
+        // The proxy says serve, the route's configured mode does not: a prediction, no row.
+        let r = CreatePairingToken(writer(&e, false))
+            .handle(
+                &req("POST", CREATE, &cookie, Some("{}"), true),
+                &HandlerCtx::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(rows(&e).is_empty());
+        let keys = [
+            http_seam::key(&CreatePairingToken(writer(&e, true))),
+            http_seam::key(&RevokePairingLink(writer(&e, true))),
+        ];
+        assert_eq!(keys, [CREATE_KEY, REVOKE_KEY]);
     }
 }
