@@ -1,5 +1,8 @@
 use crate::{
+    auth::dpop,
+    config::Mode,
     handlers::auth_session::WsSession,
+    http_auth::DpopCtx,
     proxy_http::{add_forwarded, error, strip_hop_by_hop},
     rpc_seam::{Conn, Fwd, Out},
     server::Upstream,
@@ -55,11 +58,12 @@ pub struct Ctx {
     pub tap: Arc<dyn FrameTap>,
 }
 
-const FORWARDED: [header::HeaderName; 4] = [
+const FORWARDED: [header::HeaderName; 5] = [
     header::COOKIE,
     header::AUTHORIZATION,
     header::ORIGIN,
     header::SEC_WEBSOCKET_PROTOCOL,
+    header::HeaderName::from_static("dpop"),
 ];
 
 /// Dials the engine's /ws first so its handshake rejection (401/426...) reaches the client as is.
@@ -75,7 +79,10 @@ pub async fn handler(
     let shutdown = ctx.state.shutdown_tx.subscribe();
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
     let url = format!("ws://{}:{}/ws{query}", ctx.upstream.host, ctx.upstream.port);
-    let mut req = url.into_client_request().expect("valid upstream ws url");
+    let mut req = url
+        .as_str()
+        .into_client_request()
+        .expect("valid upstream ws url");
     for name in FORWARDED {
         for v in headers.get_all(&name) {
             req.headers_mut().append(name.clone(), v.clone());
@@ -90,23 +97,67 @@ pub async fn handler(
 
     // The session Node sees on this upgrade; only computed when Rust claims some RPC tag.
     let rpc = ctx.upstream.rpc.clone();
-    let session = rpc.session(req.headers(), uri.query()).await;
+    let path = uri.path_and_query().map_or("/ws", |p| p.as_str());
+    let client_url = match headers.get(header::HOST).map(|h| h.to_str()) {
+        Some(Err(_)) => None,
+        host => dpop::request_url(host.and_then(Result::ok), path),
+    };
+    let dctx = DpopCtx {
+        url: client_url.clone().filter(|_| rpc.dpop_mode() != Mode::Off),
+        serve: rpc.dpop_mode() == Mode::Serve,
+        ..DpopCtx::default()
+    };
+    let session = rpc.session(req.headers(), uri.query(), &dctx).await;
+    let consumed = dctx.consumed.lock().expect("lock").clone();
+    if let Some((_, sid)) = consumed {
+        // Rust consumed the proof, so Node must never see it: it gets a ticket for the session.
+        match rpc.node_ticket(&sid) {
+            Some(t) => {
+                let sep = if query.is_empty() { "?" } else { "&" };
+                *req.uri_mut() = format!("{url}{sep}wsTicket={t}")
+                    .parse()
+                    .expect("ticket uri");
+                req.headers_mut().remove(header::AUTHORIZATION);
+                req.headers_mut().remove("dpop");
+            }
+            None => dctx.roll_back(),
+        }
+    }
 
     let ticket =
         crate::auth::ticket::from_query(uri.query()) != crate::auth::ticket::InQuery::Absent;
+    // Which verdict to log: a ticket wins over every header, as in Node.
+    let verdict = if ticket {
+        Some(("ws ticket verdict", false))
+    } else if headers
+        .get(header::AUTHORIZATION)
+        .is_some_and(|v| v.as_bytes().starts_with(b"DPoP "))
+    {
+        let node_url = format!("http://{}:{}{path}", ctx.upstream.host, ctx.upstream.port);
+        let htu = match (
+            headers.get("dpop").and_then(|p| p.to_str().ok()),
+            &client_url,
+        ) {
+            (Some(p), Some(c)) => dpop::node_htu_host_mismatch(p, c, &node_url),
+            _ => false,
+        };
+        Some(("ws dpop verdict", htu))
+    } else {
+        None
+    };
 
     let dial = tokio::time::timeout(ctx.upstream.dial_timeout, connect_async(req));
     let (up, res) = match dial.await {
         Err(_) => return error(StatusCode::GATEWAY_TIMEOUT, "engine_timeout"),
         Ok(Ok(ok)) => {
-            if ticket {
-                ticket_verdict(&session, 101);
+            if let Some(v) = verdict {
+                ticket_verdict(v, &session, 101);
             }
             ok
         }
         Ok(Err(WsError::Http(res))) => {
-            if ticket {
-                ticket_verdict(&session, res.status().as_u16());
+            if let Some(v) = verdict {
+                ticket_verdict(v, &session, res.status().as_u16());
             }
             let (mut parts, body) = res.into_parts();
             strip_hop_by_hop(&mut parts.headers);
@@ -136,8 +187,10 @@ pub async fn handler(
     })
 }
 
-/// Shadow log: Rust's `wsTicket` verdict against Node's handshake status (Node always decides).
-fn ticket_verdict(session: &WsSession, node: u16) {
+/// Shadow log: Rust's `wsTicket` or DPoP verdict against Node's handshake status (Node decides,
+/// unless Rust consumed a DPoP proof and handed Node a ticket). `htu`: Node rejects the proof
+/// only because it builds `htu` from the proxy's rewritten Host (expected, not a Rust bug).
+fn ticket_verdict((msg, htu): (&'static str, bool), session: &WsSession, node: u16) {
     let rust = match session {
         WsSession::Verified(_) => "verified",
         WsSession::Rejected(why) => why,
@@ -148,12 +201,13 @@ fn ticket_verdict(session: &WsSession, node: u16) {
         // 426 (protocol) and 500 come before or beside auth: nothing to compare.
         (_, n) if n != 101 && n != 401 => "not_compared",
         (WsSession::Verified(_), 101) | (WsSession::Rejected(_), 401) => "match",
+        (WsSession::Verified(_), 401) if htu => "node_htu_host_mismatch",
         _ => "mismatch",
     };
     if outcome == "mismatch" {
-        tracing::warn!(rust, node, outcome, "ws ticket verdict");
+        tracing::warn!(rust, node, outcome, "{msg}");
     } else {
-        tracing::info!(rust, node, outcome, "ws ticket verdict");
+        tracing::info!(rust, node, outcome, "{msg}");
     }
 }
 

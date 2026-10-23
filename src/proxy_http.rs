@@ -1,4 +1,4 @@
-use crate::{config::Mode, http_seam, server::Upstream};
+use crate::{auth::dpop, config::Mode, http_auth::DpopCtx, http_seam, server::Upstream};
 use axum::{
     body::Body,
     extract::{ConnectInfo, Request, State},
@@ -76,6 +76,7 @@ pub(crate) fn error(status: StatusCode, code: &str) -> Response {
 pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -> Response<Body> {
     let authority = format!("{}:{}", upstream.host, upstream.port);
     let path = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    let (original_path, original_absolute) = (path.to_owned(), req.uri().authority().is_some());
     // `OPTIONS *` has no leading slash; spliced in, it corrupts the authority (port 80).
     if !path.starts_with('/') {
         return error(StatusCode::BAD_REQUEST, "bad_request_target");
@@ -88,6 +89,12 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
+    // The URL the client used, for DPoP `htu`; absolute-form targets are Node's.
+    let client_url = match req.headers().get(header::HOST).map(|h| h.to_str()) {
+        Some(Err(_)) => None,
+        _ if original_absolute => None,
+        host => dpop::request_url(host.and_then(Result::ok), &original_path),
+    };
     let h = req.headers_mut();
     let client_host = h.get(header::HOST).cloned();
     strip_hop_by_hop(h);
@@ -103,6 +110,12 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         return forward(&upstream, req).await;
     };
     let (mut parts, body) = req.into_parts();
+    let dctx = DpopCtx {
+        url: client_url.clone(),
+        serve: mode == Mode::Serve,
+        ..DpopCtx::default()
+    };
+    parts.extensions.insert(dctx.clone());
     let body = if h.wants_body() {
         match http_seam::buffer(body, &parts.headers, http_seam::BODY_TIMEOUT).await {
             Ok(Ok(bytes)) => {
@@ -130,9 +143,18 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     if mode == Mode::Serve {
         return match h.handle(&parts, &upstream.seam.ctx).await {
             Some(r) => http_seam::served(r),
-            None => forward(&upstream, Request::from_parts(parts, body)).await,
+            None => {
+                dctx.roll_back();
+                forward(&upstream, Request::from_parts(parts, body)).await
+            }
         };
     }
+    let htu = match (parts.headers.get("dpop").map(|p| p.to_str()), &client_url) {
+        (Some(Ok(p)), Some(c)) => {
+            dpop::node_htu_host_mismatch(p, c, &format!("http://{authority}{original_path}"))
+        }
+        _ => false,
+    };
     // Shadow: Rust runs beside Node and never delays Node's answer.
     let (seam, rust_parts, route, cmp) = (
         upstream.seam.clone(),
@@ -146,7 +168,7 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     );
     let node = forward(&upstream, Request::from_parts(parts, body)).await;
     match rust {
-        Some(rust) => http_seam::tee(node, rust, route, cmp),
+        Some(rust) => http_seam::tee(node, rust, route, cmp, htu),
         None => node,
     }
 }

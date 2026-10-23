@@ -1,0 +1,590 @@
+{
+ "vectors": [
+  {
+   "name": "valid",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.Ye34Lfe3YE9QmVSHtZxHLlhHT9DfNLHrfz0XgSUGUemi5_Ret4B2cKBEzNTYbdLd2B6zb0nGTZRIMLjZxe8bIQ",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_lowercase_htm",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJwb3N0IiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.pfkD3dhO1nru4fWxDRxDJ8ZUYhXS5Bn2grdmfQCfivzj4ttPJSPSt-kX9d10zr5O5Yr7Wt5LEXrOdCOe8GXFgQ",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_request_url_query_fragment",
+   "method": "POST",
+   "url": "https://example.com/oauth/token?a=1#f",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.lgMoz-q6l4tCORLqtMs9-zCtElqN66ZojoytXKGQHaLTbQEE79TYf53aETylIi49Mdcq1LcewCqgGosB7DnHfw",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_extra_fields_and_kid",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2Iiwia2lkIjoiayJ9LCJ4NSI6MX0.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMCwiZXh0cmEiOnRydWV9._v2Zji1aZwxPPXdYDAVI4kyCkIrZiIGr01sSwjAG3NDvHZeglSB7YaIBh7LjUPboBFVwEJeo16HxjwBi97zs9Q",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_iat_float_integral",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMC4wfQ.IwfHzVDlnO-HeCFIUlKO5MhIA7trKPBrcUljVnIyumINKcjevYQoBJxvgArxgL6055nhZl-qTuKloSWln6x31Q",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_high_s",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.uO9SPHp7IjZXQCyEBNdmDxNSMY9vrPp3xF8Xd2bBMmq-JgQjwCW6m3-1_j7cwv461nOzOWUsIYlV92oHqJ26-A",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_with_ath",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMCwiYXRoIjoieGJEeU01V2pzOG1UQWhueVBabEVUQUo5UkxTVGpBcG02bUxmUDFBU2dybyJ9.jKu1v4KGigZGNvL0fejhzh_NJg-iEKX3946F5gKFlTcxekD727yAR1VoCyhdjWE3LFcm_DWSzKqYjA3R8m_qDg",
+   "expectedAccessToken": "access-token-1",
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_skew_minus_300",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 400,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.-kZjHlpzQLeHxME88-QSW-lHx7eBj7uk2pidQDqnia9X8_exY1BsgSYoEgB0yvzh9egksSojQaGIpwvtTbVjKw",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "valid_skew_plus_300",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": -200,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.Ke1VcOhBEa2te62CE12OeQoJHqQFoyvQ9FSQoUUV19zQCLFr3WVk9xmJKtOlWN5G5yFKua_Q_BHBk7oLsqga8g",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": true,
+    "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+    "jti": "proof-1",
+    "iat": 100,
+    "marker": "dpop-proof-h7ElYFCycg2GZzNRAushMktMCHlNwM1xpv073c47Qu4"
+   }
+  },
+  {
+   "name": "time_window_plus_301",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 401,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.YUvCXpRtSl8g9I5oU5gcv6IP782GfWX7xwgi03m1xFA7AcNMHE_aRtxXnMi2cl51GyL-H2kgTFdhlyRIrpq55Q",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "time_window",
+    "dpopFailureReason": "time_window"
+   }
+  },
+  {
+   "name": "time_window_minus_301",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": -201,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.OY65YyQFFf8Fhmb5Lh7QV8umVQKJUUJEe1uf2zo-oICyv8ULQZjMBUyOYp_RGr-xZEqVpCQ28qSKHryzX_1sFg",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "time_window",
+    "dpopFailureReason": "time_window"
+   }
+  },
+  {
+   "name": "time_window_1000",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 1000,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.mDctwWsQnoTCy5eTMevyK20VQ5K-f2mDT9zZvXFmRTDmYzy9xqKTt4Bq8D-ncYodkoPqeGeuix_rax5NlLLd0A",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "time_window",
+    "dpopFailureReason": "time_window"
+   }
+  },
+  {
+   "name": "bad_signature_before_time_window",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 1000,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.ozM3o2FvTdYxPE_qjfbnHzn6X3lUyEcTC9u7Oj_varwUZ1ZpkL276NhBZsXkCtS1TrdU8TScr068FtqOSgWcew",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "invalid_signature",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "method_mismatch",
+   "method": "GET",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.ISlHggflVaoxutpeAJaBeIYhCjS6U8P3zqHb7T9S4cgjMcRwACPhlEPwMz_9_SlXyGUcgFbf6UH1_SCqTqO8eQ",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "method_mismatch",
+    "dpopFailureReason": "request_mismatch"
+   }
+  },
+  {
+   "name": "url_mismatch",
+   "method": "POST",
+   "url": "https://example.com/other",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.LzpnwWmcZfVo2H38F5pUcPxLDmIJqto30UVVWx711Cupaju-RrZcR4DJF4nU-Gww_KKCmL1bTaDa8P942XS_Fw",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "url_mismatch",
+    "dpopFailureReason": "request_mismatch"
+   }
+  },
+  {
+   "name": "key_mismatch",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "other-thumbprint",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.Q3I6MqBzc_9aVkKGPMxjgrUbelXrxR7KD1BTSiGs9N6nqPxhswP31Y1E-be59RFxUjfl_NSokl8qMnnr_YGqdg",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "key_mismatch",
+    "dpopFailureReason": "key_mismatch"
+   }
+  },
+  {
+   "name": "key_mismatch_before_bad_signature",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "x",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.VAb4gyLUjTdmtFCGJR3soBHOvnIHCj8DpFx7gXW8REhk_lJkTy2CybpdqKg8pmLnnVpTy6pYyv6gRc0MMVQj4Q",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "key_mismatch",
+    "dpopFailureReason": "key_mismatch"
+   }
+  },
+  {
+   "name": "method_mismatch_before_bad_signature",
+   "method": "GET",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.HVVS9TswIIYk_1NSvaCGV50GjSTOx85u6jdjXDh_Ik9i_vpCUmg99KqZlZqrZmEuvPfr4rKsUcLDIV3tQW1J4Q",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "method_mismatch",
+    "dpopFailureReason": "request_mismatch"
+   }
+  },
+  {
+   "name": "ath_missing",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.WTMCtYK-ynSbS1KP_fTOLPHqkJTOfS-TKWHxNNzGaJmcabACYBPpYw2UzgKiniJ7LzX1XoyOjSmG-OjwSkiDTQ",
+   "expectedAccessToken": "access-token-1",
+   "node": {
+    "ok": false,
+    "code": "access_token_hash_mismatch",
+    "dpopFailureReason": "token_mismatch"
+   }
+  },
+  {
+   "name": "ath_wrong",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMCwiYXRoIjoiMlNtS0VOR3djMWczM0V2WVhheGtHdzg4N3lla2ZsMVRwVTh2UDFzdnpfbyJ9.JiYfH4nwzb3nze59To0ZV3Vjg1ylT2sREZbhp5hkyVJIeB45Cl7jQgtBxMqUn6PK-YK3eiwQ9bwu9XtgDVjK2g",
+   "expectedAccessToken": "access-token-1",
+   "node": {
+    "ok": false,
+    "code": "access_token_hash_mismatch",
+    "dpopFailureReason": "token_mismatch"
+   }
+  },
+  {
+   "name": "ath_before_bad_signature",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.TVScI9WNzJOClnqYZ2Wfqy54PLgxrpku8pBtQSwhMOXIJXHNMA2Lvf4Fu0zh0T4kuKE99RiVcM12Xs6TL5NCUQ",
+   "expectedAccessToken": "access-token-1",
+   "node": {
+    "ok": false,
+    "code": "access_token_hash_mismatch",
+    "dpopFailureReason": "token_mismatch"
+   }
+  },
+  {
+   "name": "private_jwk_d",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2IiwiZCI6Ik5WMEkydkpQMnJwMS1MZmY5VEdUb0dOSUlZWF9fVklSTHVVYW5CS1pOODAifX0.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.Y6b9euwyzp5Df77PlW9rS13L_oRNh3tmaB7t100I2yF3a80sTUXKRXZS_YtZE3Qup_czKZv_ucFlyY6VZEE-jQ",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "malformed_header_json",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "ew.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.x9A43CXd0kKwfSU8pz-eWjQ-waVuUeTSZxNAT5kCghxoZ6nGw68dSDVg8BzNERRb4k35HaH6hlDGpSy8TNak7A",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "malformed_payload_json",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.ew.uJnCU8VBcvj3U-HX7kOP7Bavug79DxtAk0s7CZRIZyNnEC7NOeNb2Xh1EIHGxJqMhn5v1D1MBpCazcktEBCb-g",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "missing_proof",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "missing_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "two_parts",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "empty_signature_part",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "typ_wrong",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImp3ayI6eyJrdHkiOiJFQyIsIngiOiI5Skg1TnQ4TlpmS3NDalVrNXd3ekJjSWRqaVdGQkg4RklwTUNkdUNmWlowIiwieSI6Inh3aDdKRVRjYXIxV1pNQ0hJeG9FN1NwTFpVTHVKbXFiU1BRN3hsRTFKbUUiLCJjcnYiOiJQLTI1NiJ9fQ.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.-4_yb2sIopJJpW7yylCm-f-Gt7ueO-uT_jtAqJiG2xsNuz2pvUUwJlE2yaaqRvwX8eYttsPOvBeRCXq5i31K2Q",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "alg_es384",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMzg0IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.LFGTbwcB8Vs-Mh2p4ZtMwer1K9OLTruszFSnDmataU1F8VWAq-jSRwRVugVmIoWZmpL0TEgmH6S-8WFC85t0MQ",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "kty_rsa",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IlJTQSIsIngiOiI5Skg1TnQ4TlpmS3NDalVrNXd3ekJjSWRqaVdGQkg4RklwTUNkdUNmWlowIiwieSI6Inh3aDdKRVRjYXIxV1pNQ0hJeG9FN1NwTFpVTHVKbXFiU1BRN3hsRTFKbUUiLCJjcnYiOiJQLTI1NiJ9fQ.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0._R6UylPQDf1yUupiowS1miXLmAcg1Gpg7T6hXsduanPVMPcFc5RYqSc9aVq4TTr-3kILl8_9euS3PyyamgmeWg",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "empty_jti",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6IiIsImlhdCI6MTAwfQ.CQFHz0MjUtLypXWtmtoVsD5I19pGkLDflCLy3Rsd-dLVqzHr-7NC4R0xpYu95DPwXbM--oxYYrXfz2JVC0mWpQ",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "iat_fraction",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMC41fQ.E46RfcM20saEU5PX0Tq0V9_Pr1YW9Nqd80_rsy3-je_UNPdZ2oCWWt8HfKgGgs0LIPhmHaC2azsmeLZxeFQGnA",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "iat_string",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOiIxMDAifQ.fosfRaltdtMQZLakULfaMT9028xbtDtOyKu-ETy5tFOCZJiQKy75cKmjQ2acAYBEWaS181Zfbmnc05gFk5ULwg",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "malformed_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "x_31_bytes",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": null,
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IkFRRUJBUUVCQVFFQkFRRUJBUUVCQVFFQkFRRUJBUUVCQVFFQkFRRUJBUSIsInkiOiJ4d2g3SkVUY2FyMVdaTUNISXhvRTdTcExaVUx1Sm1xYlNQUTd4bEUxSm1FIiwiY3J2IjoiUC0yNTYifX0.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.nrBWMW1RSZRpRLxJnvsqp_pvbvJCBl8f4smtbIUWo86I9GR0Xy47d0G_AZPEcrZ0EO8rCJbmqPzkLGP1_N3tDg",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "invalid_proof",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "point_off_curve",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": null,
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoiQVFFQkFRRUJBUUVCQVFFQkFRRUJBUUVCQVFFQkFRRUJBUUVCQVFFQkFRRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.BwTjHHwX1_O6oaV1s5ABx0PXQQV9OOKHfP_QWnb2jGAo_cJVjUGFKJDDiU7XXshgBHuVIeXDxltb2qQll5BLEg",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "invalid_signature",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "signature_63_bytes",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.D2Fy7QOlRcWdxeZmkoZdxNlONJ7yImlAxoPlusuFgPnn4TUuPLzSEJgkhcKe-eOM-Q8c4yzmv1b6VtW6IUNU",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "invalid_signature",
+    "dpopFailureReason": "invalid_proof"
+   }
+  },
+  {
+   "name": "signature_zero_s",
+   "method": "POST",
+   "url": "https://example.com/oauth/token",
+   "now": 101,
+   "expectedThumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A",
+   "proof": "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Imt0eSI6IkVDIiwieCI6IjlKSDVOdDhOWmZLc0NqVWs1d3d6QmNJZGppV0ZCSDhGSXBNQ2R1Q2ZaWjAiLCJ5IjoieHdoN0pFVGNhcjFXWk1DSEl4b0U3U3BMWlVMdUptcWJTUFE3eGxFMUptRSIsImNydiI6IlAtMjU2In19.eyJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9vYXV0aC90b2tlbiIsImp0aSI6InByb29mLTEiLCJpYXQiOjEwMH0.4xKWwzwtyGCAzl4Gtugxnr0Z8JtWP99qatMxmLp6-JQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "expectedAccessToken": null,
+   "node": {
+    "ok": false,
+    "code": "invalid_signature",
+    "dpopFailureReason": "invalid_proof"
+   }
+  }
+ ],
+ "thumbprints": [
+  {
+   "jwk": {
+    "kty": "EC",
+    "x": "9JH5Nt8NZfKsCjUk5wwzBcIdjiWFBH8FIpMCduCfZZ0",
+    "y": "xwh7JETcar1WZMCHIxoE7SpLZULuJmqbSPQ7xlE1JmE",
+    "crv": "P-256"
+   },
+   "thumbprint": "NBRVqxoA4MO4zrAQ2SUpAMsFsQqip_vLVgtd3TRj70A"
+  },
+  {
+   "jwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "a\"b\\c\u0001é",
+    "y": "-_"
+   },
+   "thumbprint": "m-ehoyBg7gfOYjKiq5Yuas7dfbot2qrkGgxAMbhpD7k"
+  }
+ ],
+ "htu": [
+  {
+   "input": "http://127.0.0.1:3789/api/auth/session?x=1#f",
+   "output": "http://127.0.0.1:3789/api/auth/session"
+  },
+  {
+   "input": "http://LOCALHOST:80/a/./b/../c",
+   "output": "http://localhost/a/c"
+  },
+  {
+   "input": "http://localhost:3789//double",
+   "output": "http://localhost:3789//double"
+  },
+  {
+   "input": "http://localhost:3789/%7e/%2e/x y",
+   "output": "http://localhost:3789/%7e/x%20y"
+  },
+  {
+   "input": "http://localhost:3789/ws?wsTicket=a",
+   "output": "http://localhost:3789/ws"
+  },
+  {
+   "input": "https://example.com:443/p",
+   "output": "https://example.com/p"
+  }
+ ],
+ "ath": {
+  "token": "access-token-1",
+  "ath": "xbDyM5Wjs8mTAhnyPZlETAJ9RLSTjApm6mLfP1ASgro"
+ }
+}

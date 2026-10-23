@@ -945,3 +945,235 @@ fn ws_ticket_issue_shadow_matches_and_node_accepts_rust_tickets() {
     drop(d);
     assert!(!home.exists());
 }
+
+/// An ES256 DPoP proof (`dsaEncoding: "ieee-p1363"`), with `ath` when `token` is given.
+fn dpop_proof(key: &p256::ecdsa::SigningKey, htm: &str, htu: &str, token: Option<&str>) -> String {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use p256::ecdsa::{Signature, signature::Signer};
+    use sha2::Digest;
+    static JTI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let p = key.verifying_key().to_sec1_point(false);
+    let b = p.as_bytes();
+    let (x, y) = (B64.encode(&b[1..33]), B64.encode(&b[33..65]));
+    let h = format!(
+        r#"{{"typ":"dpop+jwt","alg":"ES256","jwk":{{"kty":"EC","crv":"P-256","x":"{x}","y":"{y}"}}}}"#
+    );
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let jti = format!(
+        "live-{}",
+        JTI.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let ath = token.map_or(String::new(), |t| {
+        format!(
+            r#","ath":"{}""#,
+            B64.encode(sha2::Sha256::digest(t.as_bytes()))
+        )
+    });
+    let pl = format!(r#"{{"htm":"{htm}","htu":"{htu}","jti":"{jti}","iat":{iat}{ath}}}"#);
+    let hp = format!("{}.{}", B64.encode(h), B64.encode(pl));
+    let sig: Signature = key.sign(hp.as_bytes());
+    format!("{hp}.{}", B64.encode(sig.to_bytes()))
+}
+
+/// A native client pairs through `/oauth/token` with a DPoP key (Node answers), then uses the
+/// DPoP token through Rust: `GET /api/auth/session` in shadow, `/ws` with DPoP in serve.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn dpop_native_client_through_rust() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message, client::IntoClientRequest};
+
+    let Some((d, base, home, pairing)) = start_with("dpop", |home, cmd| {
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap().replace(
+            "\"projects.readFile\" = \"shadow\"",
+            "\"projects.readFile\" = \"serve\"\n\"GET /ws dpop\" = \"serve\"",
+        );
+        std::fs::write(&cfg, t).unwrap();
+        std::fs::create_dir_all(home.join("ws")).unwrap();
+        std::fs::write(home.join("ws/small.txt"), b"hello\n").unwrap();
+        cmd.current_dir(home.join("ws"));
+    }) else {
+        return;
+    };
+    let cfg = std::fs::read_to_string(home.join("vekrel.toml")).unwrap();
+    let engine = cfg
+        .split("[engine]")
+        .nth(1)
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("port = ")))
+        .unwrap()
+        .to_owned();
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let internal = format!("http://127.0.0.1:{engine}");
+    let key = p256::ecdsa::SigningKey::from_slice(&[11; 32]).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let markers = || {
+        std::fs::read_dir(home.join("userdata/secrets"))
+            .unwrap()
+            .filter(|e| {
+                let n = e.as_ref().unwrap().file_name();
+                n.to_str().unwrap().starts_with("dpop-proof-")
+            })
+            .count()
+    };
+
+    // 1. Pairing with a proof for the URL the client used: Node (behind the proxy) rejects it.
+    let exchange = |htu: String| {
+        let form = [
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("subject_token", pairing.as_str()),
+            (
+                "subject_token_type",
+                "urn:t3:params:oauth:token-type:machine-bootstrap",
+            ),
+            (
+                "requested_token_type",
+                "urn:ietf:params:oauth:token-type:access_token",
+            ),
+            ("client_label", "live dpop"),
+        ];
+        let req = http
+            .post(format!("{base}/oauth/token"))
+            .header("dpop", dpop_proof(&key, "POST", &htu, None))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(
+                url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(form)
+                    .finish(),
+            );
+        rt.block_on(async {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap())
+        })
+    };
+    let (s, body) = exchange(format!("{base}/oauth/token"));
+    println!("oauth/token, proof for the public URL: {s} {body}");
+    assert_eq!(s, 401, "{body}");
+    assert!(
+        body.contains(r#""dpopFailureReason":"request_mismatch""#),
+        "{body}"
+    );
+    // ... and accepts one for the engine's internal URL.
+    let (s, body) = exchange(format!("{internal}/oauth/token"));
+    println!("oauth/token, proof for the internal URL: {s} {body}");
+    assert_eq!(s, 200, "{body}");
+    let issued: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(issued["token_type"], "DPoP");
+    let token = issued["access_token"].as_str().unwrap().to_owned();
+    let before = markers();
+
+    // 2. Shadow `GET /api/auth/session`: (proof URL, Node's answer).
+    let session = |htu: String| {
+        let req = http
+            .get(format!("{base}/api/auth/session"))
+            .header("authorization", format!("DPoP {token}"))
+            .header("dpop", dpop_proof(&key, "GET", &htu, Some(&token)));
+        rt.block_on(async {
+            let r = req.send().await.unwrap();
+            let v: Value = r.json().await.unwrap();
+            v["authenticated"].as_bool().unwrap()
+        })
+    };
+    let public_ok = session(format!("{base}/api/auth/session"));
+    let internal_ok = session(format!("{internal}/api/auth/session"));
+    println!(
+        "session (shadow): Node says public-URL proof={public_ok}, internal-URL proof={internal_ok}"
+    );
+    assert!(!public_ok && internal_ok);
+    std::thread::sleep(Duration::from_millis(500));
+    let l = log(&home);
+    let shadow: Vec<&str> = l
+        .lines()
+        .filter(|l| l.contains("rust shadow") && l.contains("GET /api/auth/session"))
+        .collect();
+    for s in &shadow {
+        println!("{s}");
+    }
+    assert_eq!(shadow.len(), 2, "{shadow:?}");
+    assert!(shadow[0].contains("outcome=\"node_htu_host_mismatch\""));
+    assert!(shadow[1].contains("outcome=\"mismatch\""));
+    assert_eq!(
+        markers(),
+        before + 1,
+        "only Node's own consumed proof; shadow writes none"
+    );
+
+    // 3. `/ws` with DPoP (serve): Rust consumes the public-URL proof and opens Node's socket with
+    //    a ticket; `projects.readFile` is answered by Rust. The same proof again is a replay.
+    let ws = home.join("ws").to_string_lossy().into_owned();
+    let proof = dpop_proof(
+        &key,
+        "GET",
+        &format!("http://127.0.0.1:{port}/ws"),
+        Some(&token),
+    );
+    let upgrade = || {
+        let mut req = format!("ws://127.0.0.1:{port}/ws?orchestrationProtocol=2")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("authorization", format!("DPoP {token}").parse().unwrap());
+        req.headers_mut().insert("dpop", proof.parse().unwrap());
+        req
+    };
+    let exit = rt.block_on(async {
+        let (mut c, res) = tokio_tungstenite::connect_async(upgrade())
+            .await
+            .expect("DPoP upgrade");
+        assert_eq!(res.status(), 101);
+        let m = json!({"_tag":"Request","id":7,"tag":"projects.readFile",
+            "payload":{"cwd": ws, "relativePath": "small.txt"},"headers":[]});
+        c.send(Message::text(m.to_string())).await.unwrap();
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(20), c.next()).await;
+            let Ok(Some(Ok(Message::Text(t)))) = msg else {
+                panic!("no frame: {msg:?}")
+            };
+            let v: Value = serde_json::from_str(t.as_str()).unwrap();
+            if let Some(m) = v
+                .as_array()
+                .cloned()
+                .unwrap_or(vec![v])
+                .into_iter()
+                .find(|m| m["_tag"] == "Exit" && m["requestId"] == 7)
+            {
+                break m["exit"].clone();
+            }
+        }
+    });
+    println!("readFile on a DPoP socket: {exit}");
+    assert_eq!(exit["_tag"], "Success");
+    let replay = rt.block_on(tokio_tungstenite::connect_async(upgrade()));
+    match replay {
+        Err(WsError::Http(r)) => {
+            let body =
+                String::from_utf8_lossy(r.body().as_deref().unwrap_or_default()).into_owned();
+            println!("replayed DPoP upgrade: {} {body}", r.status());
+            assert_eq!(r.status(), 401);
+        }
+        other => panic!("replay: {:?}", other.map(|_| ())),
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let l = log(&home);
+    let verdicts: Vec<&str> = l
+        .lines()
+        .filter(|l| l.contains("ws dpop verdict"))
+        .collect();
+    for v in &verdicts {
+        println!("{v}");
+    }
+    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+    assert!(verdicts[0].contains("rust=\"verified\" node=101 outcome=\"match\""));
+    assert!(verdicts[1].contains("rust=\"replay\" node=401 outcome=\"match\""));
+    assert!(!l.contains("deferred_unverifiable_credential"), "{l}");
+    drop(d);
+    assert!(!home.exists());
+}

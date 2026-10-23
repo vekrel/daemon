@@ -8,6 +8,7 @@ use crate::{
         HandlerCtx, VerifiedSession,
         auth_session::{AuthSession, WsSession},
     },
+    http_auth::DpopCtx,
     http_seam::{ShadowLimit, json_path},
 };
 use axum::http::HeaderMap;
@@ -47,6 +48,8 @@ pub struct Seam {
     pub ctx: HandlerCtx,
     /// Verifies the connection's session; without it every session is deferred to Node.
     auth: Option<Arc<AuthSession>>,
+    /// `/ws` DPoP proofs (`"GET /ws dpop"`); `Mode::default()` is shadow.
+    dpop: Mode,
 }
 
 impl std::fmt::Debug for Seam {
@@ -88,12 +91,37 @@ impl Seam {
         self.handlers.is_empty()
     }
 
-    /// The connection's session from the upgrade request Node sees.
-    pub(crate) async fn session(&self, h: &HeaderMap, query: Option<&str>) -> WsSession {
+    /// `/ws` DPoP proofs: `serve` consumes them (Node then gets a Rust ticket), `shadow` only
+    /// checks them, `off` leaves them to Node.
+    pub fn with_dpop_mode(mut self, mode: Mode) -> Self {
+        self.dpop = mode;
+        self
+    }
+
+    pub(crate) fn dpop_mode(&self) -> Mode {
+        self.dpop
+    }
+
+    /// The connection's session from the upgrade request Node sees (`dctx`: the client's URL).
+    pub(crate) async fn session(
+        &self,
+        h: &HeaderMap,
+        query: Option<&str>,
+        dctx: &DpopCtx,
+    ) -> WsSession {
         match (&self.auth, self.is_empty()) {
-            (Some(a), false) => a.ws_session(h, query).await,
+            (Some(a), false) => a.ws_session(h, query, dctx).await,
             _ => WsSession::Deferred,
         }
+    }
+
+    /// A `wsTicket` for `sid`, so Node opens the socket of a DPoP proof Rust consumed.
+    pub(crate) fn node_ticket(&self, sid: &str) -> Option<String> {
+        let key = self.auth.as_ref()?.files().key()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        Some(crate::auth::ticket::issue(sid, now.as_millis() as i64, &key).0)
     }
 
     fn find(&self, tag: &str) -> Option<(&Arc<dyn UnaryHandler>, Mode)> {

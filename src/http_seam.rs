@@ -443,6 +443,8 @@ pub(crate) fn tee(
     rust: JoinHandle<Option<Response<Bytes>>>,
     route: String,
     cmp: Compare,
+    // Node rejects a DPoP proof only for the rewritten Host (see `dpop::node_htu_host_mismatch`).
+    htu: bool,
 ) -> Response<Body> {
     let (parts, body) = node.into_parts();
     // shortcut: a body without a known length (chunked) is skipped too; Node sends lengths for JSON.
@@ -465,6 +467,16 @@ pub(crate) fn tee(
         };
         match diff(&cmp, status, &headers, &bytes, &rust) {
             None => tracing::info!(route, outcome = "match", "rust shadow"),
+            // Expected while Node sits behind the proxy: not a Rust bug.
+            Some((field, path)) if htu => {
+                tracing::info!(
+                    route,
+                    outcome = "node_htu_host_mismatch",
+                    field,
+                    path,
+                    "rust shadow"
+                )
+            }
             Some((field, path)) => {
                 tracing::warn!(route, outcome = "mismatch", field, path, "rust shadow")
             }

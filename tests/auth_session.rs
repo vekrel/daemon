@@ -296,7 +296,7 @@ async fn dpop_bound_session_without_proof_is_rejected_and_with_proof_goes_to_nod
         body(&e, &[("authorization", &format!("Bearer {t}"))]).await,
         unauth()
     );
-    // The proof itself is Node's to check.
+    // Without the proxy's client URL (see `tests/dpop.rs`) Rust cannot check the proof.
     assert!(
         ask(&e, &[("authorization", &format!("DPoP {t}"))])
             .await
@@ -666,7 +666,7 @@ fn ticket() -> String {
 
 async fn ws(env: &Env, query: &str) -> WsSession {
     env.handler()
-        .ws_session(&HeaderMap::new(), Some(query))
+        .ws_session(&HeaderMap::new(), Some(query), &Default::default())
         .await
 }
 
@@ -694,7 +694,10 @@ async fn valid_ticket_verifies_with_row_session() {
     let mut h = HeaderMap::new();
     h.insert("authorization", "DPoP x".parse().unwrap());
     h.insert("cookie", cookie("junk").parse().unwrap());
-    let s = e.handler().ws_session(&h, Some(&q(&ticket()))).await;
+    let s = e
+        .handler()
+        .ws_session(&h, Some(&q(&ticket())), &Default::default())
+        .await;
     assert!(matches!(s, WsSession::Verified(_)), "{s:?}");
 }
 

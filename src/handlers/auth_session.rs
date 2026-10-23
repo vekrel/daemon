@@ -2,6 +2,7 @@
 use super::HandlerCtx;
 use crate::{
     auth::{shadow::AuthFiles, ticket, token},
+    http_auth::{self, DpopCtx},
     http_seam::RouteHandler,
 };
 use axum::{
@@ -111,15 +112,15 @@ impl RouteHandler for AuthSession {
         _ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Response<Bytes>>> {
         async move {
-            let state = match self.credential(&req.headers)? {
-                Cred::Missing | Cred::Rejected => None,
-                Cred::Token { token, dpop } => {
-                    let files = self.files.clone();
-                    tokio::task::spawn_blocking(move || verify(&files, &token, dpop.as_deref()))
-                        .await
-                        .ok()??
-                }
-            };
+            // `getSessionState`: any credential error is `authenticated: false`.
+            let state = http_auth::authenticate(self, req)
+                .await?
+                .ok()
+                .map(|p| VerifiedSession {
+                    scopes: p.scopes,
+                    method: p.method,
+                    exp: p.expires_at_ms,
+                });
             Some(self.respond(state))
         }
         .boxed()
@@ -181,7 +182,13 @@ impl AuthSession {
 
     /// The session Node's `authenticateWebSocketUpgrade` derives, given the headers and query
     /// Node sees on the proxied upgrade. Anything Rust cannot verify is its blind spot: `Deferred`.
-    pub async fn ws_session(&self, h: &HeaderMap, query: Option<&str>) -> WsSession {
+    /// `dctx` carries the client's own URL for a DPoP proof (`GET`, the `/ws` URL).
+    pub async fn ws_session(
+        &self,
+        h: &HeaderMap,
+        query: Option<&str>,
+        dctx: &DpopCtx,
+    ) -> WsSession {
         // A ticket wins over every header, as in Node.
         match ticket::from_query(query) {
             ticket::InQuery::Unsure => return WsSession::Deferred,
@@ -193,19 +200,31 @@ impl AuthSession {
             }
             ticket::InQuery::Absent => {}
         }
-        let dpop = h
-            .get_all(header::AUTHORIZATION)
-            .iter()
-            .any(|v| v.as_bytes().starts_with(b"DPoP "));
-        if dpop {
-            return WsSession::Deferred;
-        }
         let Some(Cred::Token { token, dpop }) = self.credential(h) else {
             return WsSession::Deferred;
         };
-        let files = self.files.clone();
-        match tokio::task::spawn_blocking(move || verify(&files, &token, dpop.as_deref())).await {
-            Ok(Some(Some(v))) => WsSession::Verified(v),
+        let Some(proof) = http_auth::proof_header(h) else {
+            return WsSession::Deferred;
+        };
+        let (files, ctx) = (self.files.clone(), dctx.clone());
+        let checked = tokio::task::spawn_blocking(move || {
+            http_auth::check(
+                &files,
+                &token,
+                dpop.as_deref(),
+                proof.as_deref(),
+                "GET",
+                &ctx,
+            )
+        });
+        match checked.await {
+            Ok(Some(Ok(p))) => WsSession::Verified(VerifiedSession {
+                scopes: p.scopes,
+                method: p.method,
+                exp: p.exp,
+            }),
+            // A DPoP failure Node must also reject (logged); other credential errors stay Node's.
+            Ok(Some(Err(Some(why)))) => WsSession::Rejected(why),
             _ => WsSession::Deferred,
         }
     }
@@ -334,21 +353,9 @@ fn verify_ticket(files: &AuthFiles, t: &str) -> WsSession {
     }
 }
 
-/// `SessionStore.verify` + `rejectMcpClientAudience` + the DPoP checks. `Some(None)`: a
-/// credential error (unauthenticated); `None`: Node answers (files unavailable, DPoP proof).
-fn verify(files: &AuthFiles, t: &str, dpop: Option<&str>) -> Option<Option<VerifiedSession>> {
-    Some(
-        verify_claims(files, t, dpop)?
-            .ok()
-            .map(|p| VerifiedSession {
-                scopes: p.scopes,
-                method: p.method,
-                exp: p.exp,
-            }),
-    )
-}
-
-/// `verify` with the token claims, and for a credential error its `dpopFailureReason`.
+/// `SessionStore.verify` + `rejectMcpClientAudience` + the DPoP binding with the token claims, and for a credential error its `dpopFailureReason`. `Ok` with
+/// a `jkt`: a proof-bound token presented as DPoP, whose proof the caller must still verify
+/// (`http_auth::check`).
 pub(crate) fn verify_claims(
     files: &AuthFiles,
     t: &str,
@@ -373,8 +380,8 @@ pub(crate) fn verify_claims(
         return Some(Err(None));
     }
     match (p.jkt.is_some(), dpop) {
-        // Proof-bound token presented as DPoP: the proof check is Node's.
-        (true, Some(d)) if d == t => None,
+        // Proof-bound token presented as DPoP: the caller must verify the proof.
+        (true, Some(d)) if d == t => Some(Ok(p)),
         (true, _) | (false, Some(_)) => Some(Err(Some("invalid_proof"))),
         (false, None) => Some(Ok(p)),
     }

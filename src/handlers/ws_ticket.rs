@@ -185,14 +185,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn declines_what_node_owns() {
+    async fn declines_what_node_owns_and_answers_unbound_dpop() {
         let e = env();
         let t = mint(&payload(), &KEY);
+        // DPoP on an unbound token: Node's middleware 401 (proof checks: `http_auth`).
         let dpop = format!("DPoP {t}");
-        assert!(
-            ask(&e, &[("authorization", &dpop), ("dpop", "p")])
-                .await
-                .is_none()
+        let r = ask(&e, &[("authorization", &dpop), ("dpop", "p")])
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected(r),
+            (
+                401,
+                format!(r#"{AUTH}"invalid_credential","dpopFailureReason":"invalid_proof""#),
+                Some("DPoP".into())
+            )
         );
         // Legacy-cookie and dev-token callers are `http_auth`'s / below; key gone: decline.
         let mut dev = payload();

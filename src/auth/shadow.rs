@@ -118,6 +118,11 @@ fn credentials(h: &HeaderMap) -> Vec<String> {
 }
 
 impl AuthFiles {
+    /// The engine's `secretsDir`: the signing key's directory (replay markers live there too).
+    pub fn secrets_dir(&self) -> Option<&std::path::Path> {
+        self.key_path.parent()
+    }
+
     pub fn new(key_path: PathBuf, db_path: PathBuf) -> Self {
         AuthFiles {
             key_path,

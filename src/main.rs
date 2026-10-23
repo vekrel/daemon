@@ -67,7 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(read_file::ReadFile),
         Arc::new(browse::Browse::from_env()),
     ];
-    let mut rpc = rpc_seam::Seam::from_config(ws_handlers, &cfg.rust);
+    let mut rpc = rpc_seam::Seam::from_config(ws_handlers, &cfg.rust)
+        .with_dpop_mode(cfg.rust.mode("GET /ws dpop", config::Mode::Shadow));
     if let Some((userdata, files)) = &auth_files {
         let ctx = HandlerCtx {
             cwd: std::env::current_dir()?,
