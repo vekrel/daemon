@@ -8,6 +8,7 @@ pub mod machine_descriptor;
 pub mod pairing;
 pub mod pairing_links;
 pub mod read_file;
+pub mod thread_search;
 pub mod ws_ticket;
 
 pub use auth_session::VerifiedSession;

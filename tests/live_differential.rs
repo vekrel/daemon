@@ -3199,3 +3199,388 @@ fn read_plumbing_matches_node() {
     drop(d);
     assert!(!home.exists());
 }
+
+/// Every row of every `orchestration_*`, `projection_*` and legacy-import table, for "Rust wrote
+/// nothing" checks.
+fn data_tables(db: &rusqlite::Connection) -> Vec<(String, Vec<String>)> {
+    let mut q = db
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE 'orchestration%' \
+             OR name LIKE 'projection%') ORDER BY name",
+        )
+        .unwrap();
+    let names: Vec<String> = q
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    names
+        .into_iter()
+        .map(|t| {
+            let mut q = db.prepare(&format!("SELECT * FROM \"{t}\"")).unwrap();
+            let n = q.column_count();
+            let mut rows: Vec<String> = q
+                .query_map([], |r| {
+                    let cols: Vec<rusqlite::types::Value> =
+                        (0..n).map(|i| r.get(i)).collect::<Result<_, _>>()?;
+                    Ok(format!("{cols:?}"))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            rows.sort();
+            (t, rows)
+        })
+        .collect()
+}
+
+/// Sends each payload as `orchestration.searchThreads` on one socket, one request at a time.
+/// Returns the client's raw `exit` text and Rust's log outcome for it: `match` / `mismatch` /
+/// `declined` (shadow waits for one of them), or `served` (serve mode, no decline line).
+fn search_threads(
+    base: &str,
+    home: &Path,
+    cookie: &str,
+    payloads: &[serde_json::Value],
+    serve: bool,
+) -> Vec<(String, String)> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let outcomes = || -> Vec<String> {
+        log(home)
+            .lines()
+            .filter(|l| l.contains("tag=\"orchestration.searchThreads\""))
+            .filter_map(|l| {
+                ["match", "mismatch", "declined"]
+                    .into_iter()
+                    .find(|o| l.contains(&format!("outcome=\"{o}\"")))
+                    .map(str::to_owned)
+            })
+            .collect()
+    };
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut c = auth_ws(&port, cookie).await;
+        let mut out = Vec::new();
+        for (id, payload) in payloads.iter().enumerate() {
+            let seen = outcomes().len();
+            let r = serde_json::json!({"_tag":"Request","id":id.to_string(),
+                "tag":"orchestration.searchThreads","payload":payload,"headers":[]});
+            c.send(Message::text(r.to_string())).await.unwrap();
+            let exit = loop {
+                let m = tokio::time::timeout(Duration::from_secs(60), c.next()).await;
+                let Ok(Some(Ok(Message::Text(t)))) = m else {
+                    panic!("no frame: {m:?}")
+                };
+                #[derive(serde::Deserialize)]
+                struct F<'a> {
+                    #[serde(rename = "_tag")]
+                    tag: &'a str,
+                    #[serde(rename = "requestId")]
+                    id: Option<String>,
+                    #[serde(borrow)]
+                    exit: Option<&'a serde_json::value::RawValue>,
+                }
+                if let Ok(f) = serde_json::from_str::<F>(t.as_str())
+                    && f.tag == "Exit"
+                    && f.id == Some(id.to_string())
+                {
+                    break f.exit.unwrap().get().to_owned();
+                }
+            };
+            // Shadow: Rust's line comes when both answers are in; serve: a decline is logged
+            // before Node is asked.
+            let deadline = Instant::now() + Duration::from_secs(if serve { 0 } else { 60 });
+            let outcome = loop {
+                if let Some(o) = outcomes().get(seen) {
+                    break o.clone();
+                }
+                if Instant::now() >= deadline {
+                    break if serve { "served" } else { "none" }.to_owned();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            out.push((exit, outcome));
+        }
+        out
+    })
+}
+
+/// The payloads of `tests/golden/thread_search.json`, over `tests/fixtures/thread_search.sql`.
+fn thread_search_payloads() -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let q = |s: &str| json!({ "query": s });
+    let mut v: Vec<serde_json::Value> = [
+        "foo",
+        "FOO",
+        "hello",
+        "HELLO world",
+        "Hello World foo",
+        "100%",
+        "e_w",
+        "h!",
+        "%%",
+        "__",
+        "!!",
+        "!%",
+        "ärger",
+        "Ärger",
+        "Öl 🎉",
+        "🎉",
+        "midneedle",
+        "MIDNEEDLE",
+        "startneedle",
+        "endneedle",
+        "exactfit",
+        "overfit",
+        "emojicut",
+        "emojiend",
+        "emojiin",
+        "wsmark",
+        "line",
+        "double  space",
+        "Double SPACE",
+        "spacedcut",
+        "tie break",
+        " foo ",
+        "\u{a0}foo\u{feff}",
+        "\tfoo\n",
+        "paddedid",
+        "345",
+        "hiddenkey",
+        "streamingonly",
+        "systemonly",
+        "archivedonly",
+        "deletedonly",
+        "goneproject",
+        "bulk item",
+        "item 0",
+        "nomatchatall",
+        "",
+        " a ",
+        "   ",
+        "ab",
+    ]
+    .iter()
+    .map(|s| q(s))
+    .collect();
+    v.extend([
+        q(&"b".repeat(200)),
+        q(&"b".repeat(201)),
+        q(&format!("  {}  ", "b".repeat(200))),
+        q(&"🎉".repeat(100)),
+        q(&"🎉".repeat(101)),
+        json!({"query": "bulk item", "limit": 1}),
+        json!({"query": "bulk item", "limit": 50}),
+        json!({"query": "bulk item", "limit": 7}),
+        json!({"query": "bulk item", "limit": 10.0}),
+        json!({"query": "bulk item", "limit": 0}),
+        json!({"query": "bulk item", "limit": 51}),
+        json!({"query": "bulk item", "limit": 1.5}),
+        json!({"query": "bulk item", "limit": -1}),
+        json!({"query": "bulk item", "limit": "2"}),
+        json!({"query": "bulk item", "limit": null}),
+        json!({"query": "foo", "extra": true}),
+        json!({"query": 5}),
+        json!({"query": null}),
+        json!({}),
+        json!("foo"),
+        json!(null),
+    ]);
+    v
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn thread_search_shadow_matches_node() {
+    let golden_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/thread_search.json"
+    );
+    let fixture = include_str!("fixtures/thread_search.sql");
+    let payloads = thread_search_payloads();
+    let load = |home: &Path| {
+        let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+        db.busy_timeout(Duration::from_secs(10)).unwrap();
+        db.execute_batch(fixture).unwrap();
+        db
+    };
+
+    // Shadow: Node answers; Rust's answer is compared in the daemon.
+    let Some((d, base, home, token)) = start_with("search", |home, cmd| {
+        cmd.current_dir(home);
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let db = load(&home);
+    let before = data_tables(&db);
+    let shadow = search_threads(&base, &home, &cookie, &payloads, false);
+    assert_eq!(
+        before,
+        data_tables(&db),
+        "the DB changed during a shadow run"
+    );
+    drop((db, d));
+
+    let golden: Vec<serde_json::Value> = payloads
+        .iter()
+        .zip(&shadow)
+        .map(|(p, (exit, o))| {
+            let rust = if o == "declined" {
+                "declined"
+            } else {
+                "served"
+            };
+            serde_json::json!({"payload": p, "rust": rust, "exit": exit})
+        })
+        .collect();
+    let count = |o: &str| shadow.iter().filter(|s| s.1 == o).count();
+    println!(
+        "searchThreads shadow: {} match, {} mismatch, {} declined, {} without a line (of {})",
+        count("match"),
+        count("mismatch"),
+        count("declined"),
+        count("none"),
+        shadow.len()
+    );
+    for (p, (exit, o)) in payloads.iter().zip(&shadow) {
+        if o != "match" && o != "declined" {
+            println!("{o}: {p} -> {exit}");
+        }
+    }
+    assert_eq!(count("mismatch") + count("none"), 0);
+    if std::env::var_os("VEKREL_WRITE_GOLDEN").is_some() {
+        let text = serde_json::to_string_pretty(&golden).unwrap() + "\n";
+        std::fs::write(golden_path, text).unwrap();
+    }
+    let committed: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(golden_path).unwrap()).unwrap();
+    assert_eq!(golden, committed, "Node no longer answers like the golden");
+
+    // Serve: Rust answers what it served in shadow, byte for byte, and writes nothing.
+    let Some((d, base, home, token)) = start_with("search-serve", |home, cmd| {
+        cmd.current_dir(home);
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(&cfg, t + "\"orchestration.searchThreads\" = \"serve\"\n").unwrap();
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let db = load(&home);
+    let before = data_tables(&db);
+    let served = search_threads(&base, &home, &cookie, &payloads, true);
+    assert_eq!(
+        before,
+        data_tables(&db),
+        "the DB changed during a served run"
+    );
+    drop((db, d));
+    for (g, (exit, o)) in golden.iter().zip(&served) {
+        assert_eq!(g["rust"], o.as_str(), "{}", g["payload"]);
+        assert_eq!(g["exit"], exit.as_str(), "{}", g["payload"]);
+    }
+    assert!(!home.exists());
+}
+
+mod support {
+    pub mod real_db;
+}
+
+/// `VEKREL_REAL_DB`: the owner's projects, threads and messages copied into the live engine's
+/// temp DB, then queries drawn from the threads' own titles, compared in shadow. Nothing from the
+/// copy is printed or written outside the temp dirs.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs> and VEKREL_REAL_DB"]
+fn thread_search_real_db_shadow_matches_node() {
+    use rusqlite::{Connection, OpenFlags};
+    let Some(copy) = support::real_db::real_db() else {
+        return;
+    };
+    let titles: Vec<String> = {
+        let c = Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut q = c
+            .prepare(
+                "SELECT title FROM orchestration_v2_projection_threads \
+                 WHERE deleted_at IS NULL ORDER BY thread_id",
+            )
+            .unwrap();
+        q.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let n = 60.min(titles.len());
+    let payloads: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            let title = &titles[i * titles.len() / n];
+            let words: Vec<&str> = title.split_whitespace().collect();
+            let longest = words
+                .iter()
+                .copied()
+                .max_by_key(|w| w.chars().count())
+                .unwrap_or(title.as_str());
+            let query = match i % 4 {
+                0 => longest.to_owned(),
+                1 => longest.to_ascii_uppercase(),
+                _ => words.iter().take(3).copied().collect::<Vec<_>>().join(" "),
+            };
+            match i % 4 {
+                3 => serde_json::json!({"query": query, "limit": i % 50 + 1}),
+                _ => serde_json::json!({ "query": query }),
+            }
+        })
+        .collect();
+
+    let Some((d, base, home, token)) = start_with("search-real", |home, cmd| {
+        cmd.current_dir(home);
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let db = Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("ATTACH DATABASE ?1 AS r", [copy.to_str().unwrap()])
+        .unwrap();
+    for t in [
+        "projection_projects",
+        "orchestration_v2_projection_threads",
+        "orchestration_v2_projection_messages",
+    ] {
+        db.execute(
+            &format!("INSERT OR IGNORE INTO main.{t} SELECT * FROM r.{t}"),
+            [],
+        )
+        .unwrap();
+    }
+    db.execute_batch("DETACH DATABASE r").unwrap();
+    let before = data_tables(&db);
+    let shadow = search_threads(&base, &home, &cookie, &payloads, false);
+    assert_eq!(
+        before,
+        data_tables(&db),
+        "the DB changed during a shadow run"
+    );
+    drop((db, d));
+    let count = |o: &str| shadow.iter().filter(|s| s.1 == o).count();
+    let hits = shadow
+        .iter()
+        .filter(|s| {
+            s.0.starts_with(r#"{"_tag":"Success","value":{"matches":[{"#)
+        })
+        .count();
+    println!(
+        "searchThreads over the owner DB: {} match, {} mismatch, {} declined, {} without a line \
+         (of {}; {hits} with at least one match)",
+        count("match"),
+        count("mismatch"),
+        count("declined"),
+        count("none"),
+        shadow.len()
+    );
+    assert_eq!(count("mismatch") + count("none"), 0);
+    assert!(count("match") * 10 >= shadow.len() * 9, "too many declines");
+    assert!(!home.exists());
+}

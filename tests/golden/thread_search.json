@@ -1,0 +1,497 @@
+[
+  {
+    "payload": {
+      "query": "foo"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"foo from the assistant only\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"tie break foo first\",\"messageCreatedAt\":\"2026-01-03T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "FOO"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"foo from the assistant only\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"tie break foo first\",\"messageCreatedAt\":\"2026-01-03T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "hello"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "HELLO world"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "Hello World foo"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "100%"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"100% done_with! it\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "e_w"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"100% done_with! it\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "h!"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"100% done_with! it\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "%%"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "__"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "!!"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "!%"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "ärger"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "Ärger"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Ärger über Öl 🎉\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "Öl 🎉"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Ärger über Öl 🎉\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "🎉"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Ärger über Öl 🎉\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxemojiin🎉zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…\",\"messageCreatedAt\":\"2026-01-01T00:00:08.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "midneedle"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa midneedle bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…\",\"messageCreatedAt\":\"2026-01-01T00:00:01.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "MIDNEEDLE"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa midneedle bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…\",\"messageCreatedAt\":\"2026-01-01T00:00:01.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "startneedle"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"startneedle cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc…\",\"messageCreatedAt\":\"2026-01-01T00:00:02.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "endneedle"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd endneedle\",\"messageCreatedAt\":\"2026-01-01T00:00:03.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "exactfit"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"exactfit eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"messageCreatedAt\":\"2026-01-01T00:00:04.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "overfit"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"overfit ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff…\",\"messageCreatedAt\":\"2026-01-01T00:00:05.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "emojicut"
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…\\udf89yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyemojicutzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…\",\"messageCreatedAt\":\"2026-01-01T00:00:06.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "emojiend"
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxemojiendyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\\ud83c…\",\"messageCreatedAt\":\"2026-01-01T00:00:07.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "emojiin"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxemojiin🎉zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…\",\"messageCreatedAt\":\"2026-01-01T00:00:08.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "wsmark"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"wsmark line sep\",\"messageCreatedAt\":\"2026-01-01T00:00:09.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "line"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"wsmark line sep\",\"messageCreatedAt\":\"2026-01-01T00:00:09.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "double  space"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg Double SPACE hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh…\",\"messageCreatedAt\":\"2026-01-01T00:00:10.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "Double SPACE"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "spacedcut"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii spacedcut jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj…\",\"messageCreatedAt\":\"2026-01-01T00:00:11.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "tie break"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"tie break foo first\",\"messageCreatedAt\":\"2026-01-03T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": " foo "
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"foo from the assistant only\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"tie break foo first\",\"messageCreatedAt\":\"2026-01-03T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": " foo﻿"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"foo from the assistant only\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"tie break foo first\",\"messageCreatedAt\":\"2026-01-03T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "\tfoo\n"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"foo from the assistant only\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"tie break foo first\",\"messageCreatedAt\":\"2026-01-03T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "paddedid"
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-pad\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"paddedid marker\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "345"
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Fail\",\"error\":{\"_tag\":\"OrchestrationSearchThreadsError\",\"message\":\"Failed to search threads\",\"cause\":{\"name\":\"ThreadSearchError\",\"message\":\"Thread search decode failed.\",\"cause\":{\"name\":\"SchemaError\",\"message\":\"Expected string\\n  at [0][\\\"matchText\\\"]\"}}}}]}"
+  },
+  {
+    "payload": {
+      "query": "hiddenkey"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "streamingonly"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "systemonly"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "archivedonly"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "deletedonly"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "goneproject"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "bulk item"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-bulk-19\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 19\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-38\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 38\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-17\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 17\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-37\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 37\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-16\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 16\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-35\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 35\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-55\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 55\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-14\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 14\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-34\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 34\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-13\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 13\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-53\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 53\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-32\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 32\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-52\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 52\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-11\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 11\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-31\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 31\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-10\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 10\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-50\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 50\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-29\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 29\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-49\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 49\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-08\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 08\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-28\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 28\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-07\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 07\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-47\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 47\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-26\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 26\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-46\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 46\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-05\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 05\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-25\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 25\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-04\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 04\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-44\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 44\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-23\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 23\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-43\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 43\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-02\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 02\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-22\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 22\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-01\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 01\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-41\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 41\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-20\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 20\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-40\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 40\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-39\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 39\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-18\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 18\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-36\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 36\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-15\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 15\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-54\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 54\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-33\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 33\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-12\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 12\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-51\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 51\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-30\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 30\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-09\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 09\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-48\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 48\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-27\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 27\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-06\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 06\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "item 0"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-bulk-08\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 08\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-07\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 07\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-05\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 05\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-04\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 04\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-02\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 02\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-01\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 01\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-09\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 09\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-06\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 06\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-03\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 03\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "nomatchatall"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": ""
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value with a length of at least 2\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": " a "
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value with a length of at least 2\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "   "
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value with a length of at least 2\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "ab"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa midneedle bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…\",\"messageCreatedAt\":\"2026-01-01T00:00:01.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value with a length of at most 200\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  "
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-long\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"…aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa midneedle bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…\",\"messageCreatedAt\":\"2026-01-01T00:00:01.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉"
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[]}}"
+  },
+  {
+    "payload": {
+      "query": "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉"
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value with a length of at most 200\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": 1
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-bulk-19\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 19\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": 50
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-bulk-19\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 19\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-38\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 38\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-17\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 17\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-37\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 37\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-16\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 16\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-35\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 35\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-55\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 55\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-14\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 14\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-34\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 34\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-13\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 13\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-53\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 53\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-32\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 32\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-52\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 52\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-11\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 11\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-31\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 31\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-10\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 10\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-50\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 50\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-29\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 29\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-49\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 49\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-08\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 08\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-28\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 28\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-07\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 07\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-47\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 47\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-26\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 26\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-46\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 46\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-05\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 05\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-25\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 25\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-04\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 04\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-44\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 44\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-23\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 23\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-43\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 43\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-02\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 02\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-22\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 22\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-01\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 01\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-41\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 41\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-20\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 20\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-40\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 40\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-39\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 39\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-18\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 18\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-36\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 36\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-15\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 15\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-54\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 54\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-33\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 33\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-12\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 12\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-51\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 51\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-30\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 30\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-09\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 09\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-48\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 48\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-27\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 27\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-06\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"bulk item 06\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": 7
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-bulk-19\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 19\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-38\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 38\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-17\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 17\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-37\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 37\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-16\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 16\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-35\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 35\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-55\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 55\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": 10.0
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-bulk-19\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 19\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-38\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 38\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-17\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 17\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-37\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 37\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-16\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 16\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-35\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 35\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-55\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 55\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-14\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 14\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-34\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 34\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-bulk-13\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"bulk item 13\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": 0
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value between 1 and 50\\n  at [\\\"limit\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": 51
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value between 1 and 50\\n  at [\\\"limit\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": 1.5
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected an integer\\n  at [\\\"limit\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": -1
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected a value between 1 and 50\\n  at [\\\"limit\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": "2"
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected number\\n  at [\\\"limit\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "bulk item",
+      "limit": null
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected number\\n  at [\\\"limit\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": "foo",
+      "extra": true
+    },
+    "rust": "served",
+    "exit": "{\"_tag\":\"Success\",\"value\":{\"matches\":[{\"threadId\":\"ts-a\",\"projectId\":\"ts-proj-live\",\"source\":\"user\",\"snippet\":\"Hello World foo\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-b\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"foo from the assistant only\",\"messageCreatedAt\":\"2026-01-01T00:00:00.000Z\"},{\"threadId\":\"ts-c\",\"projectId\":\"ts-proj-live\",\"source\":\"assistant\",\"snippet\":\"tie break foo first\",\"messageCreatedAt\":\"2026-01-03T00:00:00.000Z\"}]}}"
+  },
+  {
+    "payload": {
+      "query": 5
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected string\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": {
+      "query": null
+    },
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected string\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": {},
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Missing key\\n  at [\\\"query\\\"]\"}]}"
+  },
+  {
+    "payload": "foo",
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected object\"}]}"
+  },
+  {
+    "payload": null,
+    "rust": "declined",
+    "exit": "{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Die\",\"defect\":\"Expected object\"}]}"
+  }
+]
