@@ -151,3 +151,55 @@ async fn bodies_over_64_kib_go_to_node_untouched() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0, "the handler never runs");
 }
+
+/// Sends a chunked request over a raw socket and returns the response bytes.
+async fn raw_chunked(url: &str, chunks: &[&[u8]]) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = url.trim_start_matches("http://").split('/').next().unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut req = format!(
+        "POST /echo HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\n\
+         x-test: kept\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    for c in chunks {
+        req.extend(format!("{:x}\r\n", c.len()).bytes());
+        req.extend_from_slice(c);
+        req.extend(b"\r\n");
+    }
+    req.extend(b"0\r\n\r\n");
+    s.write_all(&req).await.unwrap();
+    let mut out = Vec::new();
+    s.read_to_end(&mut out).await.unwrap();
+    out
+}
+
+#[tokio::test]
+async fn chunked_bodies_reach_node_byte_for_byte_on_decline() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let url = proxy(engine().await, calls.clone()).await;
+    // Malformed JSON in three chunks (handler declines), then 3 x 30 KiB (over the limit mid-read).
+    let small: [&[u8]; 3] = [b"{\"a\"", b":", b"[1,"];
+    let big = vec![b'z'; 30 << 10];
+    let large: [&[u8]; 3] = [&big, &big, &big];
+    for (chunks, handler_runs) in [(&small[..], 1), (&large[..], 0)] {
+        let before = calls.load(Ordering::SeqCst);
+        let resp = raw_chunked(&url, chunks).await;
+        let split = resp.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let (head, body) = (
+            String::from_utf8_lossy(&resp[..split]).to_lowercase(),
+            &resp[split + 4..],
+        );
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(
+            head.contains("x-test: kept") && !head.contains("x-vekrel-served-by"),
+            "{head}"
+        );
+        assert!(
+            !head.contains("transfer-encoding: chunked"),
+            "echo has a length: {head}"
+        );
+        assert_eq!(body, chunks.concat());
+        assert_eq!(calls.load(Ordering::SeqCst) - before, handler_runs);
+    }
+}

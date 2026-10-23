@@ -104,18 +104,24 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     };
     let (mut parts, body) = req.into_parts();
     let body = if h.wants_body() {
-        match http_seam::buffer(body, &parts.headers).await {
+        match http_seam::buffer(body, &parts.headers, http_seam::BODY_TIMEOUT).await {
             Ok(Ok(bytes)) => {
                 parts
                     .extensions
                     .insert(http_seam::RequestBody(bytes.clone()));
                 Body::from(bytes)
             }
-            // Too large: Node's, with every byte replayed.
+            // Too large or too slow: Node's, with every byte replayed.
             Ok(Err(body)) => return forward(&upstream, Request::from_parts(parts, body)).await,
+            // The client's body broke: Node's http server answers that with an empty
+            // `400 Bad Request` + `Connection: close` (its default clientError), so do the same.
             Err(e) => {
                 tracing::warn!("request body failed: {e}");
-                return error(StatusCode::BAD_REQUEST, "request_body_failed");
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header(header::CONNECTION, "close")
+                    .body(Body::empty())
+                    .expect("valid response");
             }
         }
     } else {

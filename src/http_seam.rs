@@ -102,11 +102,17 @@ pub const BODY_LIMIT: usize = 64 << 10;
 #[derive(Clone, Debug)]
 pub struct RequestBody(pub Bytes);
 
-/// Reads `body` whole if it fits `BODY_LIMIT`; otherwise `Err` with a body that replays every
-/// byte already read, then the rest, so Node receives the original bytes.
+/// How long `buffer` waits for the whole body before handing it to Node.
+pub const BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Reads `body` whole if it fits `BODY_LIMIT` and arrives within `timeout`; otherwise `Err` with
+/// a body that replays every byte already read, then the rest, so Node receives the original
+/// bytes (and applies its own timeouts to a slow client). The outer `Err`: the client's body
+/// broke mid-read, so nobody can answer it.
 pub(crate) async fn buffer(
     body: Body,
     h: &axum::http::HeaderMap,
+    timeout: std::time::Duration,
 ) -> Result<Result<Bytes, Body>, axum::Error> {
     use futures_util::StreamExt;
     let declared = h
@@ -117,16 +123,23 @@ pub(crate) async fn buffer(
     }
     let mut s = body.into_data_stream();
     let mut buf = Vec::new();
-    while let Some(chunk) = s.next().await {
-        buf.extend_from_slice(&chunk?);
-        if buf.len() > BODY_LIMIT {
-            let head = futures_util::stream::once(std::future::ready(Ok::<_, axum::Error>(
-                Bytes::from(buf),
-            )));
-            return Ok(Err(Body::from_stream(head.chain(s))));
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, s.next()).await {
+            Ok(None) => return Ok(Ok(buf.into())),
+            Ok(Some(chunk)) => {
+                buf.extend_from_slice(&chunk?);
+                if buf.len() <= BODY_LIMIT {
+                    continue;
+                }
+            }
+            Err(_) => {}
         }
+        // Too large or too slow.
+        let head =
+            futures_util::stream::once(std::future::ready(Ok::<_, axum::Error>(Bytes::from(buf))));
+        return Ok(Err(Body::from_stream(head.chain(s))));
     }
-    Ok(Ok(buf.into()))
 }
 
 /// The body text as Effect's `HttpApiBuilder.decodePayload` reads it for `media_type`; `None`
@@ -144,8 +157,10 @@ fn body_text<'a>(req: &'a Parts, media_type: &str) -> Option<&'a str> {
     if ct.split(';').next().unwrap_or("").trim() != media_type {
         return None;
     }
-    // Node decodes lossily (U+FFFD); invalid UTF-8 is left to it.
-    std::str::from_utf8(&req.extensions.get::<RequestBody>()?.0).ok()
+    // Node decodes lossily (U+FFFD); invalid UTF-8 is left to it. Its TextDecoder also drops a
+    // leading BOM, which Rust does not reproduce.
+    let text = std::str::from_utf8(&req.extensions.get::<RequestBody>()?.0).ok()?;
+    (!text.starts_with('\u{feff}')).then_some(text)
 }
 
 /// `JSON.parse` of a JSON payload, before the endpoint's schema. An empty body is `None`
@@ -160,6 +175,10 @@ pub fn json_body(req: &Parts) -> Option<Value> {
 /// `UrlParams.toRecord(new URLSearchParams(text))`: a key once is a string, repeated an array.
 pub fn form_body(req: &Parts) -> Option<serde_json::Map<String, Value>> {
     let text = body_text(req, "application/x-www-form-urlencoded")?;
+    // URLSearchParams drops a leading `?`; not reproduced.
+    if text.starts_with('?') {
+        return None;
+    }
     let mut out = serde_json::Map::new();
     for pair in text.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
@@ -561,6 +580,7 @@ mod tests {
     #[tokio::test]
     async fn buffer_keeps_small_bodies_and_replays_large_ones() {
         let h = HeaderMap::new();
+        let buffer = |b, h| buffer(b, h, BODY_TIMEOUT);
         let small = buffer(Body::from("abc"), &h).await.unwrap().unwrap();
         assert_eq!(&small[..], b"abc");
         // Exactly the limit still fits.
@@ -590,6 +610,33 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert_eq!(collect(r).await.len(), 65537);
+    }
+
+    #[tokio::test]
+    async fn slow_bodies_go_to_node_with_the_bytes_read_so_far() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(2);
+        tx.send(Ok(Bytes::from_static(b"part1-"))).await.unwrap();
+        let body = Body::from_stream(tokio_stream_from(rx));
+        let replay = buffer(body, &HeaderMap::new(), Duration::from_millis(50))
+            .await
+            .unwrap()
+            .unwrap_err();
+        tx.send(Ok(Bytes::from_static(b"part2"))).await.unwrap();
+        drop(tx);
+        assert_eq!(collect(replay).await, b"part1-part2");
+        // A body that breaks mid-read is the outer error.
+        let broken = futures_util::stream::iter([
+            Ok(Bytes::from_static(b"x")),
+            Err(std::io::Error::other("reset")),
+        ]);
+        let r = buffer(Body::from_stream(broken), &HeaderMap::new(), BODY_TIMEOUT).await;
+        assert!(r.is_err());
+    }
+
+    fn tokio_stream_from<T>(
+        mut rx: tokio::sync::mpsc::Receiver<T>,
+    ) -> impl futures_util::Stream<Item = T> {
+        futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx))
     }
 
     fn with_body(ct: Option<&str>, body: &[u8]) -> Parts {
@@ -649,6 +696,10 @@ mod tests {
             Some(r#"{"a":["1","€","A"],"b":"%zz x","c":"","":"d"}"#)
         );
         assert_eq!(f("").as_deref(), Some("{}"));
+        // Node drops a leading `?` (URLSearchParams) and BOM (TextDecoder): Rust declines.
+        assert_eq!(f("?a=1"), None);
+        assert_eq!(f("\u{feff}a=1"), None);
+        assert_eq!(f("a=?").as_deref(), Some(r#"{"a":"?"}"#));
         assert_eq!(f("e=%FF"), None, "Node substitutes U+FFFD");
         assert_eq!(f("e=%"), Some(r#"{"e":"%"}"#.into()));
         assert_eq!(
