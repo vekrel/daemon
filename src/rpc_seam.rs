@@ -320,6 +320,9 @@ pub(crate) enum Fwd {
     Nothing,
 }
 
+/// The access stream's tag: whenever Node serves it for a socket, Rust's auth writes decline.
+const ACCESS: &str = "subscribeAuthAccess";
+
 /// A served request in flight.
 struct Owned {
     cancel: CancellationToken,
@@ -373,6 +376,12 @@ impl Conn {
         }
     }
 
+    /// Node serves this socket's `subscribeAuthAccess` (or may): see `NodeStream`.
+    fn hold_node_stream(&mut self) {
+        let reg = &self.seam.registry;
+        self.node_stream.get_or_insert_with(|| reg.node_stream());
+    }
+
     /// Routes a client text frame: what goes upstream, and frames Rust answers right away.
     pub(crate) fn c2s(&mut self, text: &str) -> (Fwd, Vec<String>) {
         let mut out = Vec::new();
@@ -380,7 +389,14 @@ impl Conn {
             return (Fwd::Original, out);
         }
         let fwd = match serde_json::from_str::<Value>(text) {
-            Err(_) => Fwd::Original,
+            // JSON.parse may still read it (lone surrogates, deep nesting), maybe as a subscribe
+            // whose tag is spelled with escapes.
+            Err(_) => {
+                if text.contains('\\') || text.contains(ACCESS) {
+                    self.hold_node_stream();
+                }
+                Fwd::Original
+            }
             Ok(Value::Array(items)) => {
                 let n = items.len();
                 let rest: Vec<_> = items
@@ -405,7 +421,14 @@ impl Conn {
     fn take(&mut self, m: &Value, raw: Option<&str>, out: &mut Vec<String>) -> bool {
         let key = m.get("requestId").map(Value::to_string);
         match m.get("_tag").and_then(Value::as_str) {
-            Some("Request") => self.request(m, raw, out),
+            Some("Request") => {
+                let taken = self.request(m, raw, out);
+                // Deferred session, shadow, limiter skip, mode off: Node serves it.
+                if !taken && m.get("tag").and_then(Value::as_str) == Some(ACCESS) {
+                    self.hold_node_stream();
+                }
+                taken
+            }
             Some("Ack") => {
                 let Some(o) = key.and_then(|k| self.owned.get_mut(&k)) else {
                     return false;
@@ -600,9 +623,9 @@ impl Conn {
             return Some(match d.exit {
                 Some(e) => Out::Client(exit_frame(&d.id, &e)),
                 None => {
-                    if o.tag == "subscribeAuthAccess" {
-                        let reg = &self.seam.registry;
-                        self.node_stream.get_or_insert_with(|| reg.node_stream());
+                    // Declined, handed off, or panicked before its first Chunk.
+                    if o.tag == ACCESS {
+                        self.hold_node_stream();
                     }
                     Out::Node(o.raw)
                 }

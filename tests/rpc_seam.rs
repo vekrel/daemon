@@ -1580,3 +1580,54 @@ async fn a_node_owned_access_stream_is_counted_until_its_socket_closes_on_every_
         until(|| reg.node_streams() == 0).await;
     }
 }
+
+#[tokio::test]
+async fn every_subscribe_that_reaches_node_counts_as_a_node_stream() {
+    // (mode, cookie?, frame): each one reaches Node, which then serves this socket's stream.
+    let sub = request(1, "subscribeAuthAccess", json!({}));
+    // serde rejects a lone surrogate escape; JSON.parse accepts it, so Node routes the frame.
+    let lone = r#"{"_tag":"Request","id":1,"tag":"subscribeAuthAccess","payload":{"x":"\ud800"},"headers":[]}"#;
+    let escaped = r#"{"_tag":"Request","id":1,"tag":"subscribeAuthAccess","payload":{"x":"\ud800"},"headers":[]}"#;
+    let cases: [(&str, Mode, bool, &str, ShadowLimit); 5] = [
+        ("deferred", Mode::Serve, false, &sub, ShadowLimit::default()),
+        ("shadow", Mode::Shadow, true, &sub, ShadowLimit::default()),
+        (
+            "limiter_busy",
+            Mode::Shadow,
+            true,
+            &sub,
+            ShadowLimit::new(0, Duration::from_secs(10)),
+        ),
+        (
+            "unparseable",
+            Mode::Serve,
+            true,
+            lone,
+            ShadowLimit::default(),
+        ),
+        (
+            "unparseable_escaped",
+            Mode::Serve,
+            true,
+            escaped,
+            ShadowLimit::default(),
+        ),
+    ];
+    for (name, mode, verified, frame, limit) in cases {
+        let (_dir, files, _w) = access_env();
+        let s = access_seam(mode, &files);
+        let reg = s.registry().clone();
+        let mut r = rig_with(s, limit).await;
+        let h = if verified {
+            vec![("cookie", cookie(&["access:read"]))]
+        } else {
+            vec![]
+        };
+        let mut c = connect(r.proxy, "", &h).await;
+        send(&mut c, frame).await;
+        assert_eq!(next_ev(&mut r).await, format!("text:{frame}"), "{name}");
+        until(|| reg.node_streams() == 1).await;
+        c.close(None).await.unwrap();
+        until(|| reg.node_streams() == 0).await;
+    }
+}
