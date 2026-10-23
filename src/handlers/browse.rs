@@ -196,6 +196,11 @@ static COLLATOR: LazyLock<CollatorBorrowed<'static>> = LazyLock::new(|| {
     Collator::try_new(Default::default(), CollatorOptions::default()).expect("compiled data")
 });
 
+/// `a.localeCompare(b)` under the root-like default locale.
+pub(crate) fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    COLLATOR.compare(a, b)
+}
+
 /// `entries.toSorted((l, r) => l.name.localeCompare(r.name))` over `readdir`'s order, which
 /// libuv's scandir sorts with `strcmp`: byte order first, then a stable collation sort.
 pub fn sort_names(names: &mut [String]) {

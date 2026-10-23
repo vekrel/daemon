@@ -3905,3 +3905,351 @@ fn projects_served_matches_node_compression_and_writes_nothing() {
     drop(d);
     assert!(!home.exists());
 }
+
+/// The engine may not reach an AI provider: no provider CLI on `PATH` (the engine runs from an
+/// absolute `node`), an empty `HOME` (no provider credentials), and no restart continuation of the
+/// runs a copied DB holds (`continueThreadsAfterServerUpdate` defaults to true).
+fn isolate_engine(home: &Path, cmd: &mut Command) {
+    let node = std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("node"))
+                .find(|n| n.is_file())
+        })
+        .expect("node on PATH");
+    let cfg = home.join("vekrel.toml");
+    let t = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(
+        &cfg,
+        t.replace("command = \"node\"", &format!("command = {:?}", node)),
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join("userdata")).unwrap();
+    std::fs::create_dir_all(home.join("fakehome")).unwrap();
+    std::fs::write(
+        home.join("userdata/settings.json"),
+        r#"{"continueThreadsAfterServerUpdate":false}"#,
+    )
+    .unwrap();
+    cmd.current_dir(home)
+        .env("HOME", home.join("fakehome"))
+        .env("PATH", "/usr/bin:/bin");
+}
+
+/// Node's `GET /api/orchestration/shell` from the engine port: (status, snapshotSequence, raw
+/// thread texts, body).
+fn node_shell(home: &Path, cookie: &str) -> (u16, i64, Vec<String>, String) {
+    let (code, body) = curl(&[
+        "-H",
+        &format!("cookie: {cookie}"),
+        "-H",
+        "x-t3-orchestration-protocol: 2",
+        &format!("{}/api/orchestration/shell", engine_base(home)),
+    ]);
+    if code != 200 {
+        return (code, 0, vec![], body);
+    }
+    let (seq, threads) = raw_threads(&body);
+    (code, seq, threads, body)
+}
+
+/// `snapshotSequence` and each `threads[i]` as Node's bytes.
+fn raw_threads(body: &str) -> (i64, Vec<String>) {
+    #[derive(serde::Deserialize)]
+    struct Shell<'a> {
+        #[serde(rename = "snapshotSequence")]
+        seq: i64,
+        #[serde(borrow)]
+        threads: Vec<&'a serde_json::value::RawValue>,
+    }
+    let s: Shell = serde_json::from_str(body).unwrap();
+    (
+        s.seq,
+        s.threads.iter().map(|t| t.get().to_owned()).collect(),
+    )
+}
+
+/// Node's `orchestration.getArchivedShellSnapshot` over the daemon's WS: (snapshotSequence,
+/// threads re-encoded with `effect_json`, the bytes `JSON.stringify` gives for parsed JSON).
+fn node_archived(base: &str, cookie: &str) -> (i64, Vec<String>) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut c = auth_ws(&port, cookie).await;
+        let r = serde_json::json!({"_tag":"Request","id":41,"tag":"orchestration.getArchivedShellSnapshot",
+            "payload":{},"headers":[]});
+        c.send(Message::text(r.to_string())).await.unwrap();
+        loop {
+            let m = tokio::time::timeout(Duration::from_secs(60), c.next()).await;
+            let Ok(Some(Ok(Message::Text(t)))) = m else {
+                panic!("no frame: {m:?}")
+            };
+            let v: serde_json::Value = vekrel::effect_json::parse(t.as_str()).unwrap();
+            let Some(exit) = v
+                .as_array()
+                .cloned()
+                .unwrap_or(vec![v])
+                .into_iter()
+                .find(|m| m["_tag"] == "Exit" && m["requestId"] == 41)
+            else {
+                continue;
+            };
+            assert_eq!(exit["exit"]["_tag"], "Success", "{exit}");
+            let value = &exit["exit"]["value"];
+            let threads = value["threads"].as_array().unwrap();
+            return (
+                value["snapshotSequence"].as_i64().unwrap(),
+                threads
+                    .iter()
+                    .map(|t| String::from_utf8(vekrel::effect_json::to_vec(t)).unwrap())
+                    .collect(),
+            );
+        }
+    })
+}
+
+/// Rust's builder on `home`'s DB: (latestApplicationSequence, threads), one read transaction.
+fn rust_shell(
+    home: &Path,
+    location: vekrel::shell::Location,
+) -> (i64, Result<Vec<serde_json::Value>, vekrel::shell::Decline>) {
+    let db = vekrel::db::read::StateDb::new(&home.join("userdata"));
+    db.read(|c| {
+        Ok((
+            vekrel::shell::latest_application_sequence(c)?,
+            vekrel::shell::build_threads(c, location),
+        ))
+    })
+    .unwrap_or_else(|e| panic!("read: {e:?}"))
+}
+
+/// Every JSON path (array indexes as `[]`) where `a` and `b` differ, key order included.
+fn diff_paths(a: &serde_json::Value, b: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            if !x.keys().eq(y.keys()) {
+                out.push(format!("{path}.<key order>"));
+            }
+            for (k, v) in x {
+                match y.get(k) {
+                    Some(w) => diff_paths(v, w, &format!("{path}.{k}"), out),
+                    None => out.push(format!("{path}.{k} <only node>")),
+                }
+            }
+            for k in y.keys().filter(|k| !x.contains_key(*k)) {
+                out.push(format!("{path}.{k} <only rust>"));
+            }
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            if x.len() != y.len() {
+                out.push(format!("{path}.length"));
+            }
+            for (v, w) in x.iter().zip(y) {
+                diff_paths(v, w, &format!("{path}[]"), out);
+            }
+        }
+        _ if vekrel::effect_json::to_vec(a) != vekrel::effect_json::to_vec(b) => {
+            out.push(path.to_owned())
+        }
+        _ => {}
+    }
+}
+
+/// Node's thread texts against Rust's values: mismatch counts by JSON path and the differing
+/// thread ids (ids and paths only, never content).
+fn shell_mismatches(
+    node: &[String],
+    rust: &[serde_json::Value],
+) -> (std::collections::BTreeMap<String, usize>, Vec<String>) {
+    let mut paths = std::collections::BTreeMap::<String, usize>::new();
+    let mut ids = Vec::new();
+    let rust_text: Vec<Vec<u8>> = rust.iter().map(vekrel::effect_json::to_vec).collect();
+    if node.len() != rust.len() {
+        *paths.entry("threads.length".into()).or_default() += 1;
+    }
+    for (i, n) in node.iter().enumerate() {
+        let nv: serde_json::Value = vekrel::effect_json::parse(n).unwrap();
+        let id = nv["id"].as_str().unwrap_or_default().to_owned();
+        let Some(j) = rust.iter().position(|r| r["id"] == nv["id"]) else {
+            *paths.entry("threads[] <only node>".into()).or_default() += 1;
+            ids.push(id);
+            continue;
+        };
+        if i != j {
+            *paths.entry("threads[] <order>".into()).or_default() += 1;
+        }
+        if rust_text[j] != n.as_bytes() {
+            let mut out = vec![];
+            diff_paths(&nv, &rust[j], "threads[]", &mut out);
+            if out.is_empty() {
+                out.push("threads[] <bytes>".into());
+            }
+            for p in out {
+                *paths.entry(p).or_default() += 1;
+            }
+            ids.push(id);
+        }
+    }
+    (paths, ids)
+}
+
+/// Plan 6B Task 6: the shell builder against Node on the synthetic scenarios (one thread per
+/// branch of the TypeScript), active over HTTP and archived over the WS RPC, at the same
+/// sequence; plus Node's answer where Rust declines (a drifted payload is Node's 500 too).
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn shell_builder_matches_node_on_fixtures() {
+    use vekrel::shell::{Decline, Location, fixture};
+    let Some((d, base, home, token)) = start_with("shell-fx", isolate_engine) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let write = |sql: &str| {
+        let c = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+        c.busy_timeout(Duration::from_secs(20)).unwrap();
+        c.execute_batch(&format!("BEGIN IMMEDIATE; {sql} COMMIT;"))
+            .unwrap();
+    };
+    write(&fixture::scenarios().0);
+    let mut compared = (0, 0);
+    for (label, location) in [("active", Location::Active), ("archive", Location::Archive)] {
+        let (node, rust) = (0..5)
+            .find_map(|_| {
+                let (seq, node) = match location {
+                    Location::Active => {
+                        let (code, seq, threads, body) = node_shell(&home, &cookie);
+                        assert_eq!(code, 200, "{body}");
+                        (seq, threads)
+                    }
+                    Location::Archive => node_archived(&base, &cookie),
+                };
+                let (rseq, rust) = rust_shell(&home, location);
+                (rseq == seq).then(|| (node, rust.expect("Rust builds every scenario")))
+            })
+            .expect("a write moved the sequence between the reads 5 times");
+        let fx = node.iter().filter(|t| t.contains(r#""id":"fx-"#)).count();
+        let (paths, ids) = shell_mismatches(&node, &rust);
+        println!(
+            "{label}: {} threads ({fx} fixtures), mismatches {paths:?} in {ids:?}",
+            node.len()
+        );
+        assert!(paths.is_empty(), "{label}: {paths:?} {ids:?}");
+        match location {
+            Location::Active => compared.0 = fx,
+            Location::Archive => compared.1 = fx,
+        }
+    }
+    assert_eq!(compared, (30, 4), "every scenario reached both");
+
+    // A payload Effect rejects: Node's snapshot fails (500), Rust declines with the path.
+    let mut drift = fixture::Fx::default();
+    drift.thread("fx-drift", 40, serde_json::json!({"runtimeMode": "turbo"}));
+    write(&drift.0);
+    let (code, _, _, body) = node_shell(&home, &cookie);
+    assert_eq!(code, 500, "{body}");
+    assert!(body.contains("orchestration_snapshot_failed"), "{body}");
+    assert_eq!(
+        rust_shell(&home, Location::Active).1,
+        Err(Decline::PayloadDrift {
+            thread_id: "fx-drift".into(),
+            path: "thread.runtimeMode".into()
+        })
+    );
+    write("DELETE FROM orchestration_v2_projection_threads WHERE thread_id = 'fx-drift';");
+    // A legacy single linked PR: Node answers, Rust declines (URL parser not ported).
+    let mut legacy = fixture::Fx::default();
+    let mut p = fixture::thread_payload(
+        "fx-legacy-pr",
+        serde_json::json!({"linkedPullRequest": {"projectId": "p", "repository": "o/r", "number": 1,
+            "url": "https://github.com/o/r/pull/1"}}),
+    );
+    p.as_object_mut().unwrap().remove("pullRequests");
+    legacy.thread_raw("fx-legacy-pr", &p);
+    write(&legacy.0);
+    assert_eq!(node_shell(&home, &cookie).0, 200);
+    assert_eq!(
+        rust_shell(&home, Location::Active).1.unwrap_err().reason(),
+        "not_ported"
+    );
+    drop(d);
+    assert!(!home.exists());
+}
+
+/// Plan 6B Task 6, Review Focus 3: the builder against Node on a copy of the owner's DB
+/// (`VEKREL_REAL_DB`). The engine runs on the copy (isolated: no provider can start); Node's shell
+/// is captured once into a temp dir and compared per thread at the same sequence. Prints
+/// mismatch counts by JSON path and the differing thread ids, never content. A Rust decline is
+/// printed with its reason (Node answers those); a served answer must match byte for byte.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs> and VEKREL_REAL_DB=<statev2.sqlite>"]
+fn shell_builder_matches_node_on_owner_db() {
+    use vekrel::shell::Location;
+    let Some(src) = std::env::var_os("VEKREL_REAL_DB") else {
+        eprintln!("VEKREL_REAL_DB unset: skipping the owner-DB test");
+        return;
+    };
+    let Some((d, base, home, token)) = start_with("shell-owner", |home, cmd| {
+        isolate_engine(home, cmd);
+        let (dir, copy) = support::real_db::copy_from(Some(src)).unwrap();
+        std::fs::rename(&copy, home.join("userdata/statev2.sqlite")).unwrap();
+        drop(dir);
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let golden = tempfile::Builder::new()
+        .prefix("vekrel-shell-golden-")
+        .tempdir()
+        .unwrap();
+    for (label, location) in [("active", Location::Active), ("archive", Location::Archive)] {
+        let mut attempt = 0;
+        let (node, rust, node_ms, rust_ms) = loop {
+            attempt += 1;
+            assert!(attempt <= 5, "sequence moved 5 times");
+            let t = Instant::now();
+            let (seq, node) = match location {
+                Location::Active => {
+                    let (code, seq, _, body) = node_shell(&home, &cookie);
+                    assert_eq!(code, 200, "Node's shell failed");
+                    // Captured once, kept only in the temp dir.
+                    let f = golden.path().join("node-shell.json");
+                    std::fs::write(&f, &body).unwrap();
+                    let (s, threads) = raw_threads(&std::fs::read_to_string(&f).unwrap());
+                    assert_eq!(s, seq);
+                    (seq, threads)
+                }
+                Location::Archive => node_archived(&base, &cookie),
+            };
+            let node_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let (rseq, rust) = rust_shell(&home, location);
+            let rust_ms = t.elapsed().as_millis();
+            if rseq == seq {
+                break (node, rust, node_ms, rust_ms);
+            }
+            println!("{label}: sequence_skew (Node {seq}, Rust {rseq}), retrying");
+        };
+        match rust {
+            Err(e) => println!(
+                "GOLDEN {label}: Rust declined ({}: {e:?}); Node {} threads",
+                e.reason(),
+                node.len()
+            ),
+            Ok(rust) => {
+                let (paths, ids) = shell_mismatches(&node, &rust);
+                println!(
+                    "GOLDEN {label}: {} threads, {} differ, mismatches by path {paths:?}, ids {ids:?}; Node {node_ms} ms, Rust {rust_ms} ms",
+                    node.len(),
+                    ids.len()
+                );
+                assert!(paths.is_empty(), "{label}: {paths:?} {ids:?}");
+            }
+        }
+    }
+    drop(golden);
+    drop(d);
+    assert!(!home.exists());
+}

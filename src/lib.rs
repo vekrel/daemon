@@ -18,4 +18,5 @@ pub mod replay;
 pub mod rpc_seam;
 pub mod rpc_wire;
 pub mod server;
+pub mod shell;
 pub mod supervisor;
