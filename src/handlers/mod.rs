@@ -4,6 +4,7 @@ pub mod auth_session;
 pub mod browse;
 pub mod machine_descriptor;
 pub mod read_file;
+pub mod ws_ticket;
 
 pub use auth_session::VerifiedSession;
 use std::path::PathBuf;

@@ -870,3 +870,78 @@ fn ws_ticket_verdicts_match_node() {
     drop(d);
     assert!(!home.exists());
 }
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn ws_ticket_issue_shadow_matches_and_node_accepts_rust_tickets() {
+    const ROUTE: &str = "POST /api/auth/websocket-ticket";
+    let with_mode = |mode: &'static str| {
+        move |home: &Path, _: &mut Command| {
+            let cfg = home.join("vekrel.toml");
+            let t = std::fs::read_to_string(&cfg).unwrap();
+            std::fs::write(&cfg, format!("{t}\"{ROUTE}\" = \"{mode}\"\n")).unwrap();
+        }
+    };
+    let ticket_req = |base: &str, cookie: Option<&str>| {
+        let c = cookie.map(|c| format!("cookie: {c}"));
+        let mut a = vec!["-D", "-", "-X", "POST"];
+        if let Some(c) = &c {
+            a.extend(["-H", c.as_str()]);
+        }
+        let url = format!("{base}/api/auth/websocket-ticket");
+        a.push(&url);
+        let (code, out) = curl(&a);
+        let (head, body) = out.split_once("\r\n\r\n").unwrap();
+        (code, head.to_ascii_lowercase(), body.to_owned())
+    };
+
+    // Shadow: Node answers, Rust issues its own ticket alongside; no mismatches.
+    let Some((d, base, home, token)) = start_with("wsissue-shadow", with_mode("shadow")) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let (code, _, body) = ticket_req(&base, None);
+    assert_eq!(code, 401, "{body}");
+    for _ in 0..3 {
+        let (code, head, body) = ticket_req(&base, Some(&cookie));
+        assert_eq!(code, 200, "{body}");
+        assert!(!head.contains("x-vekrel-served-by"), "{head}");
+    }
+    let (matches, mismatches) = shadow_counts(&home, ROUTE);
+    println!("shadow: {matches} match, {mismatches} mismatch");
+    assert_eq!((matches, mismatches), (4, 0));
+    drop(d);
+    assert!(!home.exists());
+
+    // Serve: Rust's ticket opens Node's own `/ws` (engine port, bypassing Rust).
+    let Some((d, base, home, token)) = start_with("wsissue-serve", with_mode("serve")) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let (code, head, body) = ticket_req(&base, Some(&cookie));
+    assert_eq!(code, 200, "{body}");
+    assert!(head.contains("x-vekrel-served-by: rust"), "{head}");
+    assert!(head.contains("cache-control: no-store") && head.contains("pragma: no-cache"));
+    let ticket = serde_json::from_str::<serde_json::Value>(&body).unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let cfg = std::fs::read_to_string(home.join("vekrel.toml")).unwrap();
+    let engine = cfg
+        .split("[engine]")
+        .nth(1)
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("port = ")))
+        .unwrap()
+        .to_owned();
+    let url = format!("ws://127.0.0.1:{engine}/ws?wsTicket={ticket}&orchestrationProtocol=2");
+    let status = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(tokio_tungstenite::connect_async(url))
+        .expect("Node accepts Rust's ticket")
+        .1
+        .status();
+    println!("Node /ws with Rust ticket: {status}");
+    assert_eq!(status, 101);
+    drop(d);
+    assert!(!home.exists());
+}

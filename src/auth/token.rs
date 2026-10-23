@@ -57,6 +57,14 @@ pub(crate) fn signed_json(token: &str, key: &[u8; 32]) -> Result<Vec<u8>, TokenE
         .map_err(|_| TokenError::Malformed)
 }
 
+/// `base64UrlEncode(json) "." signPayload(...)`: the HMAC is over the encoded string, not the JSON.
+pub(crate) fn sign(json: &[u8], key: &[u8; 32]) -> String {
+    let enc = B64.encode(json);
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key length");
+    mac.update(enc.as_bytes());
+    format!("{enc}.{}", B64.encode(mac.finalize().into_bytes()))
+}
+
 /// `Buffer.from(s, "base64url")` as `timingSafeEqualBase64Url` uses it: both alphabets, other
 /// characters skipped, stops at `=`, leftover bits dropped. A strict decoder would reject
 /// signatures Node accepts (e.g. a changed final character that only flips unused bits).

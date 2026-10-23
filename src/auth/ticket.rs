@@ -1,10 +1,13 @@
 //! The engine's websocket ticket (`wsTicket` on `/ws`): the session token's format and key with
 //! `WebSocketClaims` (`SessionStore.ts` `issueWebSocketToken` / `verifyWebSocketToken`).
-use super::token::{TokenError, signed_json};
-use serde::Deserialize;
+use super::token::{TokenError, sign, signed_json};
+use serde::{Deserialize, Serialize};
 
-/// `WebSocketClaims`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// `DEFAULT_WEBSOCKET_TOKEN_TTL` (`SessionStore.ts`), in milliseconds.
+pub const TTL_MS: i64 = 5 * 60_000;
+
+/// `WebSocketClaims`, fields in schema order (the encoded JSON is what gets signed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Claims {
     pub v: u8,
     pub kind: String,
@@ -23,6 +26,22 @@ pub fn verify(ticket: &str, key: &[u8; 32]) -> Result<Claims, TokenError> {
         return Err(TokenError::Malformed);
     }
     Ok(c)
+}
+
+/// `SessionStore.issueWebSocketToken`: a ticket for `sid` issued at `iat_ms`; returns it and its `exp`.
+pub fn issue(sid: &str, iat_ms: i64, key: &[u8; 32]) -> (String, i64) {
+    let exp = iat_ms + TTL_MS;
+    let c = Claims {
+        v: 1,
+        kind: "websocket".into(),
+        sid: sid.into(),
+        iat: iat_ms,
+        exp,
+    };
+    (
+        sign(&serde_json::to_vec(&c).expect("serializable"), key),
+        exp,
+    )
 }
 
 /// Node's `searchParams.get("wsTicket")`, only where Rust is sure of it.

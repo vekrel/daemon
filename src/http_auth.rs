@@ -81,7 +81,7 @@ fn dpop_authorization(req: &Parts) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         auth::{
@@ -92,25 +92,17 @@ mod tests {
         handlers::auth_session::Descriptor,
     };
     use axum::http::Request;
-    use std::{path::PathBuf, sync::Arc};
+    use std::sync::Arc;
 
-    const KEY: [u8; 32] = [7; 32];
-    const COOKIE: &str = "t3_session_3789_fb52c29e3256";
+    pub(crate) const KEY: [u8; 32] = [7; 32];
+    pub(crate) const COOKIE: &str = "t3_session_3789_fb52c29e3256";
 
-    /// Key + DB with one live row for `payload().sid`; deleted on drop.
-    struct Env(PathBuf, AuthSession);
-    impl Drop for Env {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    fn env(name: &str) -> Env {
-        let dir =
-            std::env::temp_dir().join(format!("vekrel-httpauth-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("key.bin"), KEY).unwrap();
-        let c = rusqlite::Connection::open(dir.join("db.sqlite")).unwrap();
+    /// Key + DB with one live row for `payload().sid`, in a temp dir removed on drop.
+    pub(crate) struct Env(pub tempfile::TempDir, pub Arc<AuthSession>);
+    pub(crate) fn env() -> Env {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("key.bin"), KEY).unwrap();
+        let c = rusqlite::Connection::open(dir.path().join("db.sqlite")).unwrap();
         c.execute_batch(DDL).unwrap();
         c.execute(
             "INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
@@ -118,12 +110,15 @@ mod tests {
             [&payload().sid],
         )
         .unwrap();
-        let files = Arc::new(AuthFiles::new(dir.join("key.bin"), dir.join("db.sqlite")));
+        let files = Arc::new(AuthFiles::new(
+            dir.path().join("key.bin"),
+            dir.path().join("db.sqlite"),
+        ));
         let desc = Descriptor::web("127.0.0.1", 3789, "/tmp/vk/userdata", "");
-        Env(dir, AuthSession::new(desc, files))
+        Env(dir, Arc::new(AuthSession::new(desc, files)))
     }
 
-    fn req(path: &str, h: &[(&str, &str)]) -> Parts {
+    pub(crate) fn req(path: &str, h: &[(&str, &str)]) -> Parts {
         let mut b =
             Request::post(format!("http://127.0.0.1:3789{path}")).header("host", "127.0.0.1:3789");
         for (k, v) in h {
@@ -144,7 +139,7 @@ mod tests {
     }
 
     /// (status, body without its traceId, www-authenticate).
-    fn rejected(r: Response<Bytes>) -> (u16, String, Option<String>) {
+    pub(crate) fn rejected(r: Response<Bytes>) -> (u16, String, Option<String>) {
         let body = String::from_utf8(r.body().to_vec()).unwrap();
         let body = body.split(r#","traceId""#).next().unwrap().to_owned();
         let www = r
@@ -154,11 +149,12 @@ mod tests {
         (r.status().as_u16(), body, www)
     }
 
-    const AUTH: &str = r#"{"_tag":"MachineAuthInvalidError","code":"auth_invalid","reason":"#;
+    pub(crate) const AUTH: &str =
+        r#"{"_tag":"MachineAuthInvalidError","code":"auth_invalid","reason":"#;
 
     #[tokio::test]
     async fn cookie_and_bearer_authenticate() {
-        let e = env("ok");
+        let e = env();
         let t = mint(&payload(), &KEY);
         let cookie = format!("{COOKIE}={t}");
         let bearer = format!("Bearer {t}");
@@ -173,7 +169,7 @@ mod tests {
 
     #[tokio::test]
     async fn credential_errors_are_nodes_401() {
-        let e = env("401");
+        let e = env();
         let e = &e;
         let ask = |h: Vec<(&'static str, String)>| {
             let p = req(
@@ -221,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn dpop_authorization_declines() {
-        let e = env("dpop");
+        let e = env();
         let t = mint(&payload(), &KEY);
         let p = req(
             "/x",

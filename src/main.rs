@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
-    handlers::{HandlerCtx, auth_session, browse, machine_descriptor, read_file},
+    handlers::{HandlerCtx, auth_session, browse, machine_descriptor, read_file, ws_ticket},
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
@@ -80,17 +80,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let unsupported =
             auth_session::unsupported_engine(&cfg.engine.args, |k| std::env::var(k).ok());
         match (unsupported, userdata.to_str()) {
-            (Some(why), _) => tracing::warn!("GET /api/auth/session handler disabled: {why}"),
+            (Some(why), _) => tracing::warn!("auth handlers disabled: {why}"),
             (None, None) => {
-                tracing::warn!("GET /api/auth/session handler disabled: non-UTF-8 state dir")
+                tracing::warn!("auth handlers disabled: non-UTF-8 state dir")
             }
             (None, Some(dir)) => {
                 // The supervisor pins the engine to VEKREL_HOST=127.0.0.1, so no machine id is needed.
                 let desc = auth_session::Descriptor::web("127.0.0.1", engine_port, dir, "");
                 let auth = Arc::new(auth_session::AuthSession::new(desc, files.clone()));
-                let h: Arc<dyn RouteHandler> = auth.clone();
-                let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
-                seam = seam.with(mode, h);
+                let routes: [Arc<dyn RouteHandler>; 2] =
+                    [auth.clone(), Arc::new(ws_ticket::WsTicket(auth.clone()))];
+                for h in routes {
+                    let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
+                    seam = seam.with(mode, h);
+                }
                 // Without it (unsupported engine config) WS sessions are deferred: serve forwards to Node.
                 rpc = rpc.with_auth(auth);
             }
