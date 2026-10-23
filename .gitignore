@@ -1,2 +1,7 @@
 /target
 recordings/
+# Real state DBs (private conversation text) must never be committed.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.copy*

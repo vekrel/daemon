@@ -42,9 +42,13 @@ impl RouteHandler for Echo {
         self.0.fetch_add(1, Ordering::SeqCst);
         async move {
             let v = http_seam::json_body(req)?;
-            Some(Response::new(Bytes::from(
-                serde_json::json!({ "rust": v }).to_string(),
-            )))
+            let body = serde_json::json!({ "rust": v }).to_string();
+            Some(
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Bytes::from(body))
+                    .unwrap(),
+            )
         }
         .boxed()
     }
@@ -120,6 +124,39 @@ async fn small_json_body_reaches_the_handler() {
     assert!(rust);
     assert_eq!(body, br#"{"rust":{"a":[1]}}"#);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn served_responses_are_compressed_like_node() {
+    use std::io::Read;
+    let url = proxy(engine().await, Arc::new(AtomicUsize::new(0))).await;
+    let big = format!("[\"{}\"]", "y".repeat(2000));
+    let want = format!(r#"{{"rust":{big}}}"#);
+    let send = |ae: Option<&'static str>, body: String| {
+        let mut r = reqwest::Client::new()
+            .post(&url)
+            .header("content-type", "application/json");
+        if let Some(ae) = ae {
+            r = r.header("accept-encoding", ae);
+        }
+        async move { r.body(body).send().await.unwrap() }
+    };
+    let r = send(Some("gzip, br;q=0"), big.clone()).await;
+    assert!(r.headers().contains_key("x-vekrel-served-by"));
+    assert_eq!(r.headers()["content-encoding"], "gzip");
+    assert_eq!(r.headers()["vary"], "Accept-Encoding");
+    let gz = r.bytes().await.unwrap();
+    let mut out = String::new();
+    flate2::read::GzDecoder::new(&gz[..])
+        .read_to_string(&mut out)
+        .unwrap();
+    assert_eq!(out, want);
+    // Not accepted, or under 1 KiB: identity, still with Vary.
+    for (ae, body) in [(None, big), (Some("gzip"), "[1]".into())] {
+        let r = send(ae, body).await;
+        assert_eq!(r.headers().get("content-encoding"), None, "{ae:?}");
+        assert_eq!(r.headers()["vary"], "Accept-Encoding");
+    }
 }
 
 #[tokio::test]

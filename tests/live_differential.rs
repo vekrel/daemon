@@ -2998,3 +2998,204 @@ fn link_proof_through_daemon_matches_direct() {
     assert_eq!(direct.0, 200, "direct: {}", direct.1);
     assert_eq!(proxied, direct);
 }
+
+/// One raw GET (reqwest sends no `accept-encoding` of its own here): (status, headers, body).
+async fn raw_get(
+    http: &reqwest::Client,
+    url: &str,
+    h: &[(&str, &str)],
+) -> (u16, reqwest::header::HeaderMap, Vec<u8>) {
+    let mut r = http.get(url);
+    for (k, v) in h {
+        r = r.header(*k, *v);
+    }
+    let r = r.send().await.unwrap();
+    let (status, headers) = (r.status().as_u16(), r.headers().clone());
+    (status, headers, r.bytes().await.unwrap().to_vec())
+}
+
+/// Plan 6B Task 3 against Node: the schema gate accepts the engine's DB, Node rejects requests
+/// without the protocol header (so Rust declines them), Rust's 404 body is Node's, and Rust's
+/// compression picks Node's encoding and headers for every `accept-encoding` on a small, a
+/// threshold and a large JSON body (decoded bytes equal; compressed-byte identity reported).
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn read_plumbing_matches_node() {
+    use axum::http::Response;
+    use vekrel::{compression, http_errors, http_seam};
+    // cwd = the temp home: the engine's automatic cwd project stays small (no git identity).
+    let Some((d, base, home, token)) = start_with("plumbing", |home, cmd| {
+        cmd.current_dir(home);
+    }) else {
+        return;
+    };
+    let cookie = format!("cookie: {}", pair(&base, &home, &token));
+    let ck = cookie.trim_start_matches("cookie: ").to_owned();
+
+    // The gate accepts the DB the engine just migrated.
+    let db = vekrel::db::read::StateDb::new(&home.join("userdata"));
+    let n = db.read(|c| {
+        c.query_row("SELECT count(*) FROM projection_projects", [], |r| {
+            r.get::<_, i64>(0)
+        })
+    });
+    assert!(n.is_ok(), "gate or read failed: {n:?}");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let proto = ("x-t3-orchestration-protocol", "2");
+    rt.block_on(async {
+        let shell = format!("{base}/api/orchestration/shell");
+        let c = ("cookie", ck.as_str());
+        for (h, want) in [
+            (vec![c], 400),
+            (vec![c, ("x-t3-orchestration-protocol", "1")], 400),
+            (vec![c, proto], 200),
+        ] {
+            let (s, _, _) = raw_get(&http, &shell, &h).await;
+            assert_eq!(s, want, "{h:?}");
+        }
+        // Node's 404 body and headers, traceId aside.
+        let (s, h, body) = raw_get(
+            &http,
+            &format!("{base}/api/orchestration/threads/nope"),
+            &[c, proto],
+        )
+        .await;
+        assert_eq!(s, 404);
+        let rust = http_errors::not_found("thread_not_found");
+        let mask = |b: &[u8]| {
+            let mut v: serde_json::Value = serde_json::from_slice(b).unwrap();
+            v["traceId"] = "T".into();
+            v.to_string()
+        };
+        assert_eq!(mask(&body), mask(rust.body()));
+        assert_eq!(
+            body.len(),
+            rust.body().len(),
+            "same bytes once the 32-char id is swapped"
+        );
+        for k in ["content-type", "vary", "access-control-allow-origin"] {
+            assert_eq!(h.get(k), rust.headers().get(k), "{k}");
+        }
+    });
+
+    let mutate =
+        |body: serde_json::Value| post(&base, &ck, "/api/projects/mutate", &body.to_string());
+    let ws = home.join("projects");
+    let create = |i: usize, title: &str| {
+        mutate(serde_json::json!({
+            "type": "project.create", "commandId": format!("cmd-create-{i}"),
+            "projectId": format!("project-{i}"), "title": title,
+            "workspaceRoot": ws.join(format!("p{i}")).to_string_lossy(),
+            "createWorkspaceRootIfMissing": true,
+        }))
+    };
+    let projects = format!("{base}/api/projects");
+    let len = || {
+        rt.block_on(raw_get(&http, &projects, &[("cookie", &ck)]))
+            .2
+            .len()
+    };
+    let accepts: [Option<&str>; 20] = [
+        None,
+        Some(""),
+        Some("gzip"),
+        Some("br"),
+        Some("deflate"),
+        Some("gzip, br"),
+        Some("gzip, deflate, br, zstd"),
+        Some("br;q=0, gzip"),
+        Some("gzip;q=0.5, deflate;q=0.9"),
+        Some("identity"),
+        Some("*"),
+        Some("*;q=0"),
+        Some("br;q=0, *"),
+        Some("GZIP"),
+        Some("gzip;q=0.000"),
+        Some("gzip ; Q=0.001"),
+        Some("gzip;q=1.5, br"),
+        Some("gzip;level=1, br"),
+        Some("zstd"),
+        Some("x-gzip, gzip;q=0"),
+    ];
+    let mut identical = std::collections::BTreeMap::<&str, (usize, usize)>::new();
+    let mut matrix = |label: &str| {
+        for ae in accepts {
+            let mut h = vec![("cookie", ck.as_str())];
+            if let Some(ae) = ae {
+                h.push(("accept-encoding", ae));
+            }
+            let (s, nh, nb) = rt.block_on(raw_get(&http, &projects, &h));
+            assert_eq!(s, 200);
+            let enc = nh.get("content-encoding");
+            let plain = http_seam::decoded(enc, nb.clone().into()).expect("decodable");
+            let input = Response::builder()
+                .header("content-type", nh["content-type"].clone())
+                .header("access-control-allow-origin", "*")
+                .body(plain.clone())
+                .unwrap();
+            let r = compression::compress(ae, input);
+            let what = format!("{label} ({} bytes) accept-encoding {ae:?}", plain.len());
+            assert_eq!(r.headers().get("content-encoding"), enc, "{what}");
+            assert_eq!(r.headers().get("vary"), nh.get("vary"), "{what}");
+            // Node sends a length, never chunked; Rust's length is the body's (hyper sets it).
+            assert_eq!(nh.get("transfer-encoding"), None, "{what}");
+            assert_eq!(nh["content-length"], nb.len().to_string(), "{what}");
+            let names = |m: &reqwest::header::HeaderMap| {
+                let mut v: Vec<String> = m
+                    .keys()
+                    .map(|k| k.to_string())
+                    .filter(|k| {
+                        !["date", "connection", "keep-alive", "content-length"]
+                            .contains(&k.as_str())
+                    })
+                    .collect();
+                v.sort();
+                v
+            };
+            assert_eq!(names(r.headers()), names(&nh), "{what}");
+            let rd =
+                http_seam::decoded(r.headers().get("content-encoding"), r.body().clone()).unwrap();
+            assert_eq!(rd, plain, "{what}");
+            if let Some(e) = enc {
+                let e = e.to_str().unwrap().to_owned().leak();
+                let t = identical.entry(e).or_default();
+                t.1 += 1;
+                if r.body()[..] == nb[..] {
+                    t.0 += 1;
+                }
+            }
+        }
+        println!("{label}: {} accept-encodings agree", accepts.len());
+    };
+    matrix("the cwd project");
+    // One project, titled so the body is 1023 bytes, then 1024 (Effect's threshold).
+    create(0, "t");
+    let pad = 1023 - len() as i64;
+    assert!(pad >= 0, "two projects already over 1 KiB");
+    let rename = |i: usize, title: String| {
+        mutate(serde_json::json!({
+            "type": "project.update", "commandId": format!("cmd-rename-{i}-{}", title.len()),
+            "projectId": format!("project-{i}"), "title": title,
+        }))
+    };
+    rename(0, "t".repeat(1 + pad as usize));
+    assert_eq!(len(), 1023);
+    matrix("just under the threshold");
+    rename(0, "t".repeat(2 + pad as usize));
+    assert_eq!(len(), 1024);
+    matrix("at the threshold");
+    for i in 1..40 {
+        create(
+            i,
+            &format!("Project {i} with a longer title for a body of some size"),
+        );
+    }
+    matrix("40 projects");
+    for (e, (same, all)) in &identical {
+        println!("compressed bytes identical to Node's: {e} {same}/{all}");
+    }
+    drop(d);
+    assert!(!home.exists());
+}

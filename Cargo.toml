@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
-brotli-decompressor = "6.1.1"
+brotli = "9.0.0"
 clap = { version = "4.6.7", features = ["derive"] }
 flate2 = "1.1.10"
 getrandom = "0.3.4"
@@ -15,9 +15,9 @@ hmac = "0.13.0"
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-legacy", "http1", "tokio"] }
 icu_collator = "2.4.0"
 p256 = { version = "0.14", features = ["ecdsa"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = "0.11.1"
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-tungstenite = "0.29.0"

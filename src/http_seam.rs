@@ -225,6 +225,14 @@ fn form_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// `x-t3-orchestration-protocol: 2`, which every `/api/orchestration/*` route requires
+/// (`contracts/machineHttp.ts:81-85`). Without it Effect answers its own 400: handlers decline.
+/// A repeated header reaches Node joined (`2, 2`) and fails too.
+pub fn orchestration_protocol(req: &Parts) -> bool {
+    let mut v = req.headers.get_all("x-t3-orchestration-protocol").iter();
+    v.next().is_some_and(|v| v == "2") && v.next().is_none()
+}
+
 /// What shadow mode compares beyond status: JSON values everywhere except the listed paths
 /// (`$.ticket`, `$[*].sessionId`; `$.traceId` always), ISO timestamps at `times` within ±2 s, and
 /// the listed response headers by presence and bytes (`set-cookie` ignoring the token and with
@@ -517,7 +525,7 @@ pub(crate) fn tee(
 
 /// Node's body with its `content-encoding` (Effect's `br`, `gzip`, `deflate`) undone, capped at
 /// `TEE_LIMIT`; `None` for another coding or a corrupt body.
-fn decoded(enc: Option<&HeaderValue>, body: Bytes) -> Option<Bytes> {
+pub fn decoded(enc: Option<&HeaderValue>, body: Bytes) -> Option<Bytes> {
     use std::io::Read;
     let mut out = Vec::new();
     let limit = TEE_LIMIT + 1;
@@ -529,7 +537,7 @@ fn decoded(enc: Option<&HeaderValue>, body: Bytes) -> Option<Bytes> {
         Some(b"deflate") => flate2::read::ZlibDecoder::new(&body[..])
             .take(limit)
             .read_to_end(&mut out),
-        Some(b"br") => brotli_decompressor::Decompressor::new(&body[..], 4096)
+        Some(b"br") => brotli::Decompressor::new(&body[..], 4096)
             .take(limit)
             .read_to_end(&mut out),
         Some(_) => return None,
@@ -955,6 +963,30 @@ mod tests {
             l.spawn("d", async { Some(1) }).unwrap().await.unwrap(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn orchestration_protocol_header_must_be_exactly_2() {
+        let p = |vals: &[&str]| {
+            let mut b = Request::get("/api/orchestration/shell");
+            for v in vals {
+                b = b.header("x-t3-orchestration-protocol", *v);
+            }
+            orchestration_protocol(&b.body(()).unwrap().into_parts().0)
+        };
+        assert!(p(&["2"]));
+        for bad in [
+            &[][..],
+            &["1"],
+            &["3"],
+            &["2 "],
+            &["02"],
+            &["2, 2"],
+            &["2", "2"],
+            &[""],
+        ] {
+            assert!(!p(bad), "{bad:?}");
+        }
     }
 
     #[test]

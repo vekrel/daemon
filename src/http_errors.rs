@@ -82,6 +82,17 @@ pub fn operation_forbidden(reason: &str) -> Response<Bytes> {
     error(403, tag, "operation_forbidden", reason, None)
 }
 
+/// 404 `MachineResourceNotFoundError` (`thread_not_found`).
+pub fn not_found(reason: &str) -> Response<Bytes> {
+    error(
+        404,
+        "MachineResourceNotFoundError",
+        "not_found",
+        reason,
+        None,
+    )
+}
+
 /// 500 `MachineInternalError`.
 pub fn internal_error(reason: &str) -> Response<Bytes> {
     error(500, "MachineInternalError", "internal_error", reason, None)
@@ -152,6 +163,16 @@ mod tests {
                 operation_forbidden("current_session_revoke_not_allowed"),
                 403,
                 r#"{"_tag":"MachineOperationForbiddenError","code":"operation_forbidden","reason":"current_session_revoke_not_allowed","traceId":"T"}"#,
+            ),
+            (
+                not_found("thread_not_found"),
+                404,
+                r#"{"_tag":"MachineResourceNotFoundError","code":"not_found","reason":"thread_not_found","traceId":"T"}"#,
+            ),
+            (
+                internal_error("orchestration_snapshot_failed"),
+                500,
+                r#"{"_tag":"MachineInternalError","code":"internal_error","reason":"orchestration_snapshot_failed","traceId":"T"}"#,
             ),
             (
                 internal_error("websocket_ticket_issuance_failed"),

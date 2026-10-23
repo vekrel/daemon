@@ -1,10 +1,14 @@
 pub mod auth;
+pub mod compression;
 pub mod config;
 pub mod cookies;
+pub mod db;
+pub mod effect_json;
 pub mod handlers;
 pub mod http_auth;
 pub mod http_errors;
 pub mod http_seam;
+pub mod js_string;
 pub mod machine;
 pub mod proxy_http;
 pub mod proxy_ws;

@@ -184,7 +184,11 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     };
     if mode == Mode::Serve {
         return match h.handle(&parts, &upstream.seam.ctx).await {
-            Some(r) => http_seam::served(r),
+            // Node's global compression middleware applies to every route Rust takes over.
+            Some(r) => {
+                let accept = crate::compression::accept_encoding(&parts.headers);
+                http_seam::served(crate::compression::compress(accept.as_deref(), r))
+            }
             None => {
                 dctx.roll_back();
                 forward(&upstream, Request::from_parts(parts, body)).await
