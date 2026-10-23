@@ -270,7 +270,7 @@ fn js_trim(s: &str) -> String {
     String::from_utf16(js_string::trim(&js_string::units(s))).expect("whole pairs")
 }
 
-/// `deriveBlockedOnThreadWait`. Resolving a dynamic tool's MCP name (`resolveT3McpToolId`) is not
+/// `deriveBlockedOnThreadWait`. Resolving a dynamic tool's MCP name (`resolveT3McpToolId`, names `vekrel_*`) is not
 /// ported: reaching it declines.
 pub fn derive_blocked_on_thread_wait(
     active_run_id: Option<&str>,
@@ -291,7 +291,7 @@ pub fn derive_blocked_on_thread_wait(
         if kind != "dynamic_tool" {
             return Ok(false);
         }
-        return Err("t3_mcp_tool_name");
+        return Err("vekrel_mcp_tool_name");
     }
     Ok(false)
 }
@@ -1213,11 +1213,11 @@ mod tests {
         let tool = [item(
             "dynamic_tool",
             "waiting",
-            json!({"toolName": "t3_thread_wait"}),
+            json!({"toolName": "vekrel_thread_wait"}),
         )];
         assert_eq!(
             derive_blocked_on_thread_wait(Some("r"), &tool),
-            Err("t3_mcp_tool_name")
+            Err("vekrel_mcp_tool_name")
         );
     }
 

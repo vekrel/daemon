@@ -131,14 +131,16 @@ fn supported_engine_declines_what_rust_cannot_reproduce() {
     assert!(err("node", &["--inspect", bin], &none).contains("script"));
     assert!(err("node", &[bin, "--mode", "desktop"], &none).contains("--mode"));
     assert!(err("node", &["missing.mjs"], &none).contains("missing.mjs"));
-    let launcher = |k: &str| (k == "VEKREL_NPM_LAUNCHER_PATH").then(|| "/x/bin/t3.mjs".to_owned());
+    let launcher =
+        |k: &str| (k == "VEKREL_NPM_LAUNCHER_PATH").then(|| "/x/bin/vekrel.mjs".to_owned());
     assert!(err("node", &[bin], &launcher).contains("VEKREL_NPM_LAUNCHER_PATH"));
     // Installs where Node reports `serverInstallation`.
     for rel in [
-        "prefix/lib/node_modules/t3/dist/bin.mjs",
-        "cache/_npx/abc/node_modules/t3/dist/bin.mjs",
+        "prefix/lib/node_modules/vekrel/dist/bin.mjs",
+        "prefix/lib/node_modules/vekrel/bin/vekrel.mjs",
+        "cache/_npx/abc/node_modules/vekrel/dist/bin.mjs",
         "cache/pnpm/dlx/abc/dist/bin.mjs",
-        "home/.bun/install/cache/t3/dist/bin.mjs",
+        "home/.bun/install/cache/vekrel/dist/bin.mjs",
     ] {
         let b = fake_engine(&d, rel);
         assert!(

@@ -194,8 +194,8 @@ pub fn supported_engine(
     let entry = std::fs::canonicalize(cwd.join(script)).map_err(|e| format!("{script}: {e}"))?;
     // `resolveServerInstallation`: these entries can make Node report `serverInstallation`.
     let e = entry.to_string_lossy().replace('\\', "/");
-    if e.ends_with("/lib/node_modules/t3/dist/bin.mjs")
-        || e.ends_with("/lib/node_modules/t3/bin/t3.mjs")
+    if e.ends_with("/lib/node_modules/vekrel/dist/bin.mjs")
+        || e.ends_with("/lib/node_modules/vekrel/bin/vekrel.mjs")
         || [
             "/_npx/",
             "/pnpm/dlx/",

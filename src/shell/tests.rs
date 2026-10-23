@@ -460,13 +460,13 @@ fn a_running_run_reads_execution_items_for_the_thread_wait() {
             Some(1),
             "dynamic_tool",
             "running",
-            json!({"toolName": "t3_thread_wait", "input": {}}),
+            json!({"toolName": "vekrel_thread_wait", "input": {}}),
         );
     assert_eq!(
         build(&only_tool, Location::Active),
         Err(Decline::NotPorted {
             thread_id: "t".into(),
-            what: "t3_mcp_tool_name"
+            what: "vekrel_mcp_tool_name"
         })
     );
 }
