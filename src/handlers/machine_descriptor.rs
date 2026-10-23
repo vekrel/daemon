@@ -349,7 +349,16 @@ impl RouteHandler for MachineDescriptor {
         let g = self.state.generation.load(Ordering::SeqCst);
         let m = match &*self.cache.lock().unwrap() {
             Some((cg, m)) if *cg == g => m.clone(),
-            _ => return async { None }.boxed(),
+            _ => {
+                // Logged like every handler's decline, so each request has an outcome line.
+                tracing::info!(
+                    route = "GET /.well-known/vekrel/machine",
+                    why = "descriptor_not_loaded",
+                    outcome = "declined",
+                    "rust machine descriptor"
+                );
+                return async { None }.boxed();
+            }
         };
         let secrets = ctx.state_dir.join("secrets");
         async move {
