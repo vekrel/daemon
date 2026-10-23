@@ -2542,3 +2542,371 @@ fn pairing_consume_race_rust_vs_node() {
     drop(d);
     assert!(!home.exists());
 }
+
+// ---- clients: list, revoke, revoke-others ----
+
+/// Session ids, trace ids and times masked (`lastConnectedAt` keeps null vs set).
+fn masked_clients(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| {
+                    let m = match k.as_str() {
+                        "sessionId" | "traceId" | "issuedAt" | "expiresAt" | "ipAddress" => {
+                            Value::String(format!("<{k}>"))
+                        }
+                        "lastConnectedAt" if !v.is_null() => Value::String("<set>".into()),
+                        _ => masked_clients(v),
+                    };
+                    (k.clone(), m)
+                })
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.iter().map(masked_clients).collect()),
+        v => v.clone(),
+    }
+}
+
+/// Waits (up to `limit`) for `ws` to close; returns when, and the close frame it got.
+fn on_close(
+    rt: &tokio::runtime::Runtime,
+    mut ws: Ws,
+    limit: Duration,
+) -> tokio::task::JoinHandle<(Instant, String)> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    rt.spawn(async move {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            match tokio::time::timeout_at(deadline, ws.next()).await {
+                Err(_) => panic!("socket still open after {limit:?}"),
+                Ok(Some(Ok(Message::Close(f)))) => {
+                    return (
+                        Instant::now(),
+                        format!("{:?}", f.map(|f| (u16::from(f.code), f.reason.to_string()))),
+                    );
+                }
+                Ok(None | Some(Err(_))) => return (Instant::now(), "no close frame".into()),
+                Ok(Some(Ok(_))) => {}
+            }
+        }
+    })
+}
+
+/// What one clients scenario saw: each step, the close frame and delay of the revoked proxied
+/// socket (`B`) and of the socket that went straight to Node (`D`), and the session ids.
+struct ClientsRun {
+    steps: Vec<Step>,
+    proxied: (Duration, String),
+    direct: (Duration, String),
+    ids: [String; 4],
+}
+
+/// The scripted scenario: W (caller, admin) pairs B (access:read only), C and D; B and C connect
+/// through Rust, D straight to Node (only before revoke-others: Rust cannot see it); C's row is then expired while connected; an expired row E is
+/// inserted. Then: lists, B's 403, W's self-revoke 403, revoke B (proxied socket closes),
+/// repeats, revoke-others (D's direct socket closes), final list. `before_revoke` runs right
+/// before revoking B.
+fn clients_scenario(
+    base: &str,
+    home: &Path,
+    rt: &tokio::runtime::Runtime,
+    w: &str,
+    before_revoke: &mut dyn FnMut(),
+) -> ClientsRun {
+    let link = |body: &str| {
+        post(base, w, "/api/auth/pairing-token", body)["credential"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let b = pair(
+        base,
+        home,
+        &link(r#"{"label":"B","scopes":["orchestration:read","access:read"]}"#),
+    );
+    let c = pair(base, home, &link(r#"{"label":"C"}"#));
+    let d = pair(base, home, &link(r#"{"label":"D"}"#));
+    let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO auth_sessions (session_id, subject, scopes, method, client_device_type,
+           issued_at, expires_at)
+         VALUES ('e-expired', 'one-time-token', '[\"orchestration:read\"]', 'bearer-access-token',
+           'unknown', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let ws_b = rt.block_on(auth_ws(&port, &b));
+    let ws_c = rt.block_on(auth_ws(&port, &c));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mut steps: Vec<Step> = vec![];
+    let mut step =
+        |name: &'static str, cookie: &str, method: &str, path: &str, body: Option<&str>| {
+            let (code, rust, v) = call(base, cookie, method, path, body);
+            steps.push((name, code, rust, masked_clients(&v)));
+            v
+        };
+    let list = step("list", w, "GET", "/api/auth/clients", None);
+    let sid = |label: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["client"]["label"] == label)
+            .map(|c| c["sessionId"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    let me = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["current"] == true)
+        .unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ids = [sid("B"), sid("C"), sid("D"), me.clone()];
+    // C stays listed while connected even once expired (until Node's 5 s re-check closes it).
+    db.execute(
+        // A day before issue: in the past, with the same TTL in both homes.
+        "UPDATE auth_sessions SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', issued_at, '-1 day')
+         WHERE session_id = ?1",
+        [&ids[1]],
+    )
+    .unwrap();
+    step(
+        "list with C expired but connected",
+        w,
+        "GET",
+        "/api/auth/clients",
+        None,
+    );
+    rt.block_on(on_close(rt, ws_c, Duration::from_secs(8)))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    step("list after C closed", w, "GET", "/api/auth/clients", None);
+    step("list as B", &b, "GET", "/api/auth/clients", None);
+    let body = |s: &str| serde_json::json!({ "sessionId": s }).to_string();
+    step(
+        "revoke as B",
+        &b,
+        "POST",
+        "/api/auth/clients/revoke",
+        Some(&body(&ids[0])),
+    );
+    step(
+        "revoke-others as B",
+        &b,
+        "POST",
+        "/api/auth/clients/revoke-others",
+        None,
+    );
+    step(
+        "revoke self",
+        w,
+        "POST",
+        "/api/auth/clients/revoke",
+        Some(&body(&me)),
+    );
+
+    let closed_b = on_close(rt, ws_b, Duration::from_secs(8));
+    before_revoke();
+    let t = Instant::now();
+    step(
+        "revoke B",
+        w,
+        "POST",
+        "/api/auth/clients/revoke",
+        Some(&body(&ids[0])),
+    );
+    let (at, frame) = rt.block_on(closed_b).unwrap();
+    let proxied = (at - t, frame);
+    step(
+        "revoke B again",
+        w,
+        "POST",
+        "/api/auth/clients/revoke",
+        Some(&body(&ids[0])),
+    );
+    step(
+        "revoke unknown",
+        w,
+        "POST",
+        "/api/auth/clients/revoke",
+        Some(&body("nope")),
+    );
+    step("list after revoke", w, "GET", "/api/auth/clients", None);
+    // A socket Rust never sees: connected only now, so no list above depends on it.
+    let ws_d = rt.block_on(auth_ws(&engine_port(home), &d));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let closed_d = on_close(rt, ws_d, Duration::from_secs(10));
+    let t = Instant::now();
+    step(
+        "revoke-others",
+        w,
+        "POST",
+        "/api/auth/clients/revoke-others",
+        None,
+    );
+    let (at, frame) = rt.block_on(closed_d).unwrap();
+    let direct = (at - t, frame);
+    std::thread::sleep(Duration::from_millis(300));
+    step(
+        "list after revoke-others",
+        w,
+        "GET",
+        "/api/auth/clients",
+        None,
+    );
+    step(
+        "revoke-others again",
+        w,
+        "POST",
+        "/api/auth/clients/revoke-others",
+        None,
+    );
+    ClientsRun {
+        steps,
+        proxied,
+        direct,
+        ids,
+    }
+}
+
+/// Home A: every route shadow (Node writes; Rust's list and revoke predictions are compared).
+/// Home B: Rust serves the three routes and `subscribeAuthAccess`. Same answers, same normalised
+/// tables; B's revoked proxied socket closes within 1 s, the direct-to-Node one within ~6 s,
+/// and the Rust-served stream shows `clientRemoved` for Rust's revoke.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn clients_shadow_matches_and_serve_revokes_like_node() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
+    use tokio_tungstenite::tungstenite::Message;
+    const ROUTES: [&str; 3] = [
+        "GET /api/auth/clients",
+        "POST /api/auth/clients/revoke",
+        "POST /api/auth/clients/revoke-others",
+    ];
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let Some((da, base_a, home_a, token_a)) = start("clients-shadow") else {
+        return;
+    };
+    let w_a = pair(&base_a, &home_a, &token_a);
+    // W holds a socket in both homes (B: its stream).
+    let port_a = base_a.rsplit(':').next().unwrap().to_owned();
+    let ws_a = rt.block_on(auth_ws(&port_a, &w_a));
+    let a = clients_scenario(&base_a, &home_a, &rt, &w_a, &mut || {});
+    for route in ROUTES {
+        let (m, mm) = shadow_counts(&home_a, route);
+        println!("{route} shadow: {m} match, {mm} mismatch");
+        assert_eq!(mm, 0, "{route}");
+        assert!(m >= 3, "{route} compared");
+    }
+    let db_a = rusqlite::Connection::open(home_a.join("userdata/statev2.sqlite")).unwrap();
+    let rows_a = normalised_tables(&db_a);
+    drop(ws_a);
+
+    let Some((db, base_b, home_b, token_b)) = start_with("clients-serve", |home, _| {
+        let cfg = home.join("vekrel.toml");
+        let mut t = std::fs::read_to_string(&cfg).unwrap();
+        for r in ROUTES.iter().chain(&["subscribeAuthAccess"]) {
+            t += &format!("\"{r}\" = \"serve\"\n");
+        }
+        std::fs::write(&cfg, t).unwrap();
+    }) else {
+        return;
+    };
+    let w_b = pair(&base_b, &home_b, &token_b);
+    let port = base_b.rsplit(':').next().unwrap().to_owned();
+    let mut ws = rt.block_on(auth_ws(&port, &w_b));
+    rt.block_on(subscribe_first_chunk(&mut ws, 1));
+    // Drains the stream from here on, acking each Chunk; stops at the first `clientRemoved` seen
+    // after `armed` is set.
+    let armed = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let armed2 = armed.clone();
+    let stream = rt.spawn(async move {
+        let mut removed = vec![];
+        loop {
+            let m = tokio::time::timeout(Duration::from_secs(60), ws.next()).await;
+            let Ok(Some(Ok(Message::Text(t)))) = m else {
+                panic!("stream ended: {m:?}")
+            };
+            let f: Value = serde_json::from_str(t.as_str()).unwrap();
+            if f["requestId"] != 1 {
+                continue;
+            }
+            assert_eq!(f["_tag"], "Chunk", "{f}");
+            for e in f["values"].as_array().unwrap() {
+                if e["type"] == "clientRemoved" && armed2.lock().unwrap().is_some() {
+                    let at = armed2.lock().unwrap().unwrap();
+                    removed.push((
+                        e["payload"]["sessionId"].as_str().unwrap().to_owned(),
+                        at.elapsed(),
+                    ));
+                }
+            }
+            ws.send(Message::text(r#"{"_tag":"Ack","requestId":1}"#))
+                .await
+                .unwrap();
+            if !removed.is_empty() {
+                return (removed, ws);
+            }
+        }
+    });
+    let b = clients_scenario(&base_b, &home_b, &rt, &w_b, &mut || {
+        *armed.lock().unwrap() = Some(Instant::now());
+    });
+    let (removed, ws) = rt.block_on(stream).unwrap();
+    drop(ws);
+    println!("stream clientRemoved after Rust's revoke: {removed:?}");
+    assert_eq!(removed[0].0, b.ids[0], "clientRemoved for B");
+
+    for (x, y) in a.steps.iter().zip(&b.steps) {
+        println!("{}: {} {}", x.0, x.1, x.3);
+        assert_eq!((x.0, x.1, &x.3), (y.0, y.1, &y.3), "step {}", x.0);
+        assert!(!x.2, "A is Node's: {}", x.0);
+        assert!(y.2, "B is Rust's: {}", y.0);
+    }
+    assert_eq!(a.steps.len(), b.steps.len());
+    let last = &b.steps[b.steps.len() - 2].3;
+    assert_eq!(
+        last.as_array().unwrap().len(),
+        1,
+        "only the current session: {last}"
+    );
+    assert_eq!(
+        b.steps[b.steps.len() - 1].3,
+        serde_json::json!({"revokedCount": 0})
+    );
+    println!(
+        "proxied socket close: Node (A) {:?} {}, Rust (B) {:?} {}",
+        a.proxied.0, a.proxied.1, b.proxied.0, b.proxied.1
+    );
+    println!(
+        "direct socket close: Node (A) {:?} {}, Rust (B) {:?} {}",
+        a.direct.0, a.direct.1, b.direct.0, b.direct.1
+    );
+    assert!(
+        b.proxied.0 < Duration::from_secs(1),
+        "proxied close {:?}",
+        b.proxied.0
+    );
+    assert!(
+        b.direct.0 < Duration::from_millis(6500),
+        "direct close {:?}",
+        b.direct.0
+    );
+    assert_eq!(a.proxied.1, b.proxied.1, "same close frame as Node's");
+
+    let db_b = rusqlite::Connection::open(home_b.join("userdata/statev2.sqlite")).unwrap();
+    let rows_b = normalised_tables(&db_b);
+    println!("A rows: {rows_a:#}\nB rows: {rows_b:#}");
+    assert_eq!(rows_a, rows_b, "auth tables differ");
+    drop((db_a, db_b, da, db));
+    assert!(!home_a.exists() && !home_b.exists());
+}

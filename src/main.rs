@@ -4,8 +4,8 @@ use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
     handlers::{
-        HandlerCtx, auth_access, auth_session, browse, machine_descriptor, pairing, pairing_links,
-        read_file, ws_ticket,
+        HandlerCtx, auth_access, auth_session, browse, clients, machine_descriptor, pairing,
+        pairing_links, read_file, ws_ticket,
     },
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     access: access.clone(),
                     serve: cfg.rust.mode(key, config::Mode::Shadow) == config::Mode::Serve,
                 };
-                let routes: [Arc<dyn RouteHandler>; 7] = [
+                let routes: [Arc<dyn RouteHandler>; 10] = [
                     auth.clone(),
                     Arc::new(ws_ticket::WsTicket(auth.clone())),
                     Arc::new(pairing_links::CreatePairingToken(writer(
@@ -120,6 +120,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pairing::BROWSER_SESSION_KEY,
                     ))),
                     Arc::new(pairing::Token(writer(pairing::TOKEN_KEY))),
+                    Arc::new(clients::ListClients(auth.clone(), access.clone())),
+                    Arc::new(clients::RevokeClient(writer(clients::REVOKE_KEY))),
+                    Arc::new(clients::RevokeOtherClients(writer(
+                        clients::REVOKE_OTHERS_KEY,
+                    ))),
                 ];
                 for h in routes {
                     let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());

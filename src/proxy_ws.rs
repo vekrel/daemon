@@ -307,7 +307,8 @@ async fn pump<U>(
                 break;
             }
             _ = entry.close.cancelled() => {
-                let f = AxClose { code: 1008, reason: "session revoked".into() };
+                // Node's own close when it drops a session: 1000, no reason.
+                let f = AxClose { code: 1000, reason: "".into() };
                 let _ = client.send(AxMsg::Close(Some(f))).await;
                 break;
             }

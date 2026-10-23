@@ -77,6 +77,10 @@ impl AuthAccess {
     pub fn bypass(&self) -> Option<&'static str> {
         self.inputs.bypass()
     }
+
+    pub(crate) fn registry(&self) -> &Arc<Registry> {
+        &self.inputs.registry
+    }
 }
 
 impl Inputs {

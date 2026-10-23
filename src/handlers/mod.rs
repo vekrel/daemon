@@ -3,6 +3,7 @@
 pub mod auth_access;
 pub mod auth_session;
 pub mod browse;
+pub mod clients;
 pub mod machine_descriptor;
 pub mod pairing;
 pub mod pairing_links;

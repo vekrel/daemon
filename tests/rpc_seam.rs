@@ -1291,7 +1291,9 @@ async fn registry_tracks_proxied_sockets_and_closes_a_session() {
     assert_eq!(reg.unattributed(), 1);
     assert_eq!(reg.close_session(SID), 1);
     match tokio::time::timeout(Duration::from_secs(5), c.next()).await {
-        Ok(Some(Ok(Message::Close(Some(f))))) => assert_eq!(u16::from(f.code), 1008),
+        Ok(Some(Ok(Message::Close(Some(f))))) => {
+            assert_eq!((u16::from(f.code), f.reason.as_str()), (1000, ""))
+        }
         other => panic!("expected a close frame, got {other:?}"),
     }
     for _ in 0..100 {

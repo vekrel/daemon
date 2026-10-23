@@ -85,7 +85,7 @@ pub(crate) fn uuid_v4() -> Option<String> {
     ))
 }
 
-fn now_ms() -> Option<i64> {
+pub(crate) fn now_ms() -> Option<i64> {
     Some(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -106,7 +106,7 @@ pub struct Writer {
 impl Writer {
     /// Whether to write; `None` when the proxy says serve but the route is configured otherwise,
     /// so only a genuine shadow run returns a prediction.
-    fn serving(&self, req: &Parts) -> Option<bool> {
+    pub(crate) fn serving(&self, req: &Parts) -> Option<bool> {
         let proxy = req.extensions.get::<DpopCtx>().is_some_and(|d| d.serve);
         (!proxy || self.serve).then_some(proxy)
     }
@@ -116,7 +116,10 @@ pub const CREATE_KEY: &str = "POST /api/auth/pairing-token";
 pub const REVOKE_KEY: &str = "POST /api/auth/pairing-links/revoke";
 
 /// The middleware's principal, or its 401; `None` for callers Node keeps (dev-token sessions too).
-async fn caller(auth: &AuthSession, req: &Parts) -> Option<Result<Principal, Response<Bytes>>> {
+pub(crate) async fn caller(
+    auth: &AuthSession,
+    req: &Parts,
+) -> Option<Result<Principal, Response<Bytes>>> {
     let p = http_auth::authenticate(auth, req).await?;
     if p.as_ref()
         .is_ok_and(|p| p.session_id.starts_with("dev-auth-"))
@@ -127,7 +130,7 @@ async fn caller(auth: &AuthSession, req: &Parts) -> Option<Result<Principal, Res
 }
 
 /// The JSON body as an object; `None` (Effect's 400, Node's) for anything else.
-fn body(req: &Parts) -> Option<Map<String, Value>> {
+pub(crate) fn body(req: &Parts) -> Option<Map<String, Value>> {
     match http_seam::json_body(req)? {
         Value::Object(o) => Some(o),
         _ => None,
@@ -135,14 +138,14 @@ fn body(req: &Parts) -> Option<Map<String, Value>> {
 }
 
 /// An `optionalKey(TrimmedNonEmptyString)`: absent is `Some(None)`; `None` fails the decode.
-fn opt_trimmed(o: &Map<String, Value>, k: &str) -> Option<Option<String>> {
+pub(crate) fn opt_trimmed(o: &Map<String, Value>, k: &str) -> Option<Option<String>> {
     match o.get(k) {
         None => Some(None),
         Some(v) => Some(Some(normalize(v.as_str()?)?.to_owned())),
     }
 }
 
-fn write_db(auth: &AuthSession) -> rusqlite::Result<Connection> {
+pub(crate) fn write_db(auth: &AuthSession) -> rusqlite::Result<Connection> {
     let c = Connection::open_with_flags(
         auth.files().db_path(),
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -152,12 +155,14 @@ fn write_db(auth: &AuthSession) -> rusqlite::Result<Connection> {
     Ok(c)
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Option<T> + Send + 'static) -> Option<T> {
+pub(crate) async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
     tokio::task::spawn_blocking(f).await.ok().flatten()
 }
 
 /// `AuthAccess::bypass` off the async threads (it touches the filesystem).
-async fn bypassed(a: &Arc<AuthAccess>) -> Option<&'static str> {
+pub(crate) async fn bypassed(a: &Arc<AuthAccess>) -> Option<&'static str> {
     let a = a.clone();
     blocking(move || Some(a.bypass()))
         .await
