@@ -841,7 +841,7 @@ async fn a_slow_dry_run_is_skipped_after_250_ms() {
 async fn a_locked_db_skips_the_dry_run_at_once() {
     use vekrel::{
         auth::registry::Registry,
-        handlers::{auth_access::AuthAccess, pairing::BrowserSession},
+        handlers::{auth_access::AuthAccess, pairing::BrowserSession, pairing_links::Writer},
     };
     let (logs, _g) = capture();
     let e = Env::ok("dry-run-locked");
@@ -861,7 +861,11 @@ async fn a_locked_db_skips_the_dry_run_at_once() {
         Arc::new(Registry::default()),
         false,
     ));
-    let h = Arc::new(BrowserSession(Arc::new(e.handler()), access));
+    let h = Arc::new(BrowserSession(Writer {
+        auth: Arc::new(e.handler()),
+        access,
+        serve: false,
+    }));
     let (up, hits) = engine(200, "node".into()).await;
     let url = proxy_with(up, Mode::Shadow, h).await;
     let (s, b, took) = post_timed(&url, r#"{"credential":"CRED"}"#).await;

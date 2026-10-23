@@ -116,8 +116,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Arc::new(pairing_links::RevokePairingLink(writer(
                         pairing_links::REVOKE_KEY,
                     ))),
-                    Arc::new(pairing::BrowserSession(auth.clone(), access.clone())),
-                    Arc::new(pairing::Token(auth.clone(), access.clone())),
+                    Arc::new(pairing::BrowserSession(writer(
+                        pairing::BROWSER_SESSION_KEY,
+                    ))),
+                    Arc::new(pairing::Token(writer(pairing::TOKEN_KEY))),
                 ];
                 for h in routes {
                     let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());

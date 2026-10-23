@@ -15,9 +15,8 @@
 //! stores the proxy's `127.0.0.1`.
 use super::{
     HandlerCtx,
-    auth_access::AuthAccess,
-    auth_session::{AuthSession, LEGACY_SCOPES, iso_millis},
-    pairing_links::uuid_v4,
+    auth_session::{LEGACY_SCOPES, iso_millis},
+    pairing_links::{Writer, uuid_v4},
 };
 use crate::{
     auth::{
@@ -74,11 +73,22 @@ const GRANT_SCOPES: [&str; 16] = [
     "relay:write",
 ];
 
-/// The `AuthAccess` handler is only asked for its bypass check: while Node's own access stream
+/// The `Writer`'s `access` is only asked for its bypass check: while Node's own access stream
 /// may serve a client (Tailscale Serve, a cloud link, an unverified socket), `serve` declines so
-/// Node writes and publishes the change itself.
-pub struct BrowserSession(pub Arc<AuthSession>, pub Arc<AuthAccess>);
-pub struct Token(pub Arc<AuthSession>, pub Arc<AuthAccess>);
+/// Node writes and publishes the change itself. Its `serve` (the route's configured mode) alone
+/// decides whether to write.
+pub struct BrowserSession(pub Writer);
+pub struct Token(pub Writer);
+
+pub const BROWSER_SESSION_KEY: &str = "POST /api/auth/browser-session";
+pub const TOKEN_KEY: &str = "POST /oauth/token";
+
+/// The handler's own configured mode, when the proxy's agrees; `None` (Node's, before any DB
+/// access) when they disagree either way.
+fn own_mode(w: &Writer, req: &Parts) -> Option<bool> {
+    let proxy = req.extensions.get::<DpopCtx>().is_some_and(|d| d.serve);
+    (proxy == w.serve).then_some(w.serve)
+}
 
 /// `AuthClientMetadata` as `SessionStore.issue` stores it (`client_*` columns).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -601,13 +611,15 @@ fn dpop_challenge(mut r: Response<Bytes>) -> Response<Bytes> {
 /// Runs `consume` and answers as the route does; in shadow a predicted success carries the
 /// `DryRun` check of Node's write.
 async fn run(
-    auth: &AuthSession,
-    access: &Arc<AuthAccess>,
+    w: &Writer,
+    serve: bool,
     req: &Parts,
     a: Ask,
     route: &'static str,
 ) -> Option<Response<Bytes>> {
-    let ctx = req.extensions.get::<DpopCtx>().cloned().unwrap_or_default();
+    let (auth, access) = (&*w.auth, &w.access);
+    let mut ctx = req.extensions.get::<DpopCtx>().cloned().unwrap_or_default();
+    ctx.serve = serve;
     let now = now_ms()?;
     let files = auth.files().clone();
     let a = Arc::new(a);
@@ -882,7 +894,10 @@ impl RouteHandler for BrowserSession {
         _ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Response<Bytes>>> {
         async move {
-            const ROUTE: &str = "POST /api/auth/browser-session";
+            const ROUTE: &str = BROWSER_SESSION_KEY;
+            let Some(serve) = own_mode(&self.0, req) else {
+                return declined(ROUTE, "mode_mismatch");
+            };
             // `AuthBrowserSessionRequest`; anything else is Effect's 400.
             let Some(credential) = http_seam::json_body(req)
                 .as_ref()
@@ -890,7 +905,7 @@ impl RouteHandler for BrowserSession {
             else {
                 return declined(ROUTE, "body");
             };
-            let Some(previous) = self.0.browser_cookie(&req.headers) else {
+            let Some(previous) = self.0.auth.browser_cookie(&req.headers) else {
                 return declined(ROUTE, "cookie");
             };
             let Some(ua) = user_agent(&req.headers) else {
@@ -904,7 +919,7 @@ impl RouteHandler for BrowserSession {
                 client: client_metadata(ua, client_ip(req), Presented::default()),
                 browser: true,
             };
-            run(&self.0, &self.1, req, ask, ROUTE).await
+            run(&self.0, serve, req, ask, ROUTE).await
         }
         .boxed()
     }
@@ -934,7 +949,10 @@ impl RouteHandler for Token {
         _ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Response<Bytes>>> {
         async move {
-            const ROUTE: &str = "POST /oauth/token";
+            const ROUTE: &str = TOKEN_KEY;
+            let Some(serve) = own_mode(&self.0, req) else {
+                return declined(ROUTE, "mode_mismatch");
+            };
             let Some(form) = http_seam::form_body(req) else {
                 return declined(ROUTE, "body");
             };
@@ -1023,7 +1041,7 @@ impl RouteHandler for Token {
                 client: client_metadata(ua, client_ip(req), presented),
                 browser: false,
             };
-            run(&self.0, &self.1, req, ask, ROUTE).await
+            run(&self.0, serve, req, ask, ROUTE).await
         }
         .boxed()
     }
@@ -1037,7 +1055,7 @@ mod tests {
             dpop::tests::Client as Key,
             token::tests::{mint, payload},
         },
-        handlers::auth_access::tests::LINKS_DDL,
+        handlers::auth_access::{AuthAccess, tests::LINKS_DDL},
         http_auth::tests::{COOKIE, Env, KEY, env},
         http_seam::RequestBody,
     };
@@ -1131,7 +1149,7 @@ mod tests {
         let mut h = h.to_vec();
         h.push(("content-type", "application/json"));
         let p = request("/api/auth/browser-session", &h, body, serve);
-        BrowserSession(e.1.clone(), access(&e.0))
+        BrowserSession(writer(e, serve))
             .handle(&p, &HandlerCtx::default())
             .await
     }
@@ -1143,6 +1161,15 @@ mod tests {
             dir.path().join("db.sqlite"),
         ));
         Arc::new(AuthAccess::new(files, Arc::default(), false))
+    }
+
+    /// The handlers over `e`, with the route configured `serve` or not.
+    fn writer(e: &Env, serve: bool) -> Writer {
+        Writer {
+            auth: e.1.clone(),
+            access: access(&e.0),
+            serve,
+        }
     }
 
     fn form(cred: &str, extra: &[(&str, &str)]) -> String {
@@ -1175,7 +1202,7 @@ mod tests {
             h.push(("dpop", p));
         }
         let p = request("/oauth/token", &h, body, serve);
-        Token(e.1.clone(), access(&e.0))
+        Token(writer(e, serve))
             .handle(&p, &HandlerCtx::default())
             .await
     }
@@ -1744,6 +1771,52 @@ mod tests {
         assert!(consumed(&e, "EMPTY2"));
     }
 
+    /// Proxy and route modes that disagree (either way) decline with the DB untouched.
+    async fn mode_mismatch_declines(token_route: bool) {
+        let e = home();
+        link(&e, "LIVE", r#"["orchestration:read"]"#, None, None, FUTURE);
+        let ask = |route_serve: bool, proxy_serve: bool, token_route: bool| {
+            let e = &e;
+            async move {
+                let w = writer(e, route_serve);
+                if token_route {
+                    let p = request(
+                        "/oauth/token",
+                        &[("content-type", "application/x-www-form-urlencoded")],
+                        &form("LIVE", &[]),
+                        proxy_serve,
+                    );
+                    Token(w).handle(&p, &HandlerCtx::default()).await
+                } else {
+                    let p = request(
+                        "/api/auth/browser-session",
+                        &[("content-type", "application/json")],
+                        r#"{"credential":"LIVE"}"#,
+                        proxy_serve,
+                    );
+                    BrowserSession(w).handle(&p, &HandlerCtx::default()).await
+                }
+            }
+        };
+        // The proxy says serve, the route is configured shadow, and the reverse.
+        assert!(ask(false, true, token_route).await.is_none());
+        assert!(ask(true, false, token_route).await.is_none());
+        assert!(!consumed(&e, "LIVE"));
+        assert_eq!((markers(&e), sessions(&e)), (0, 1));
+        // Agreeing modes serve.
+        assert_eq!(ask(true, true, token_route).await.unwrap().status(), 200);
+    }
+
+    #[tokio::test]
+    async fn browser_session_mode_mismatch_declines() {
+        mode_mismatch_declines(false).await;
+    }
+
+    #[tokio::test]
+    async fn token_mode_mismatch_declines() {
+        mode_mismatch_declines(true).await;
+    }
+
     #[tokio::test]
     async fn shadow_predicts_without_writing_and_checks_nodes_write() {
         let e = home();
@@ -1767,7 +1840,7 @@ mod tests {
         let node = browser(&e, &h, body, true).await.unwrap();
         assert_eq!(
             http_seam::diff(
-                &BrowserSession(e.1.clone(), access(&e.0)).compare(),
+                &BrowserSession(writer(&e, false)).compare(),
                 node.status(),
                 node.headers(),
                 node.body(),
@@ -1800,7 +1873,7 @@ mod tests {
         let node = token(&e, Some(&p), &form("DP", &[]), true).await.unwrap();
         assert_eq!(
             http_seam::diff(
-                &Token(e.1.clone(), access(&e.0)).compare(),
+                &Token(writer(&e, false)).compare(),
                 node.status(),
                 node.headers(),
                 node.body(),
