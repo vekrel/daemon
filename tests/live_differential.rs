@@ -1177,3 +1177,383 @@ fn dpop_native_client_through_rust() {
     drop(d);
     assert!(!home.exists());
 }
+
+// ---- subscribeAuthAccess ----
+
+/// `applyAuthAccessStreamEvent` from Vekrel-Web `packages/client-runtime/src/state/auth.ts`:
+/// a snapshot replaces, upserts replace by key (appending), removes filter by key.
+fn apply_auth_event(state: &mut serde_json::Value, e: &serde_json::Value) {
+    let upsert = |list: &mut serde_json::Value, key: &str, v: &serde_json::Value| {
+        let a = list.as_array_mut().unwrap();
+        a.retain(|x| x[key] != v[key]);
+        a.push(v.clone());
+    };
+    let p = &e["payload"];
+    match e["type"].as_str().unwrap() {
+        "snapshot" => *state = p.clone(),
+        "pairingLinkUpserted" => upsert(&mut state["pairingLinks"], "id", p),
+        "pairingLinkRemoved" => state["pairingLinks"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|x| x["id"] != p["id"]),
+        "clientUpserted" => upsert(&mut state["clientSessions"], "sessionId", p),
+        "clientRemoved" => state["clientSessions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|x| x["sessionId"] != p["sessionId"]),
+        t => panic!("unknown event {t}"),
+    }
+}
+
+/// `list` sorted by `key`, for order-free comparison.
+fn by_key(list: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+    let mut v = list.as_array().unwrap().clone();
+    v.sort_by_key(|x| x[key].as_str().unwrap().to_owned());
+    v
+}
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn auth_ws(port: &str, cookie: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://127.0.0.1:{port}/ws?orchestrationProtocol=2")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    tokio_tungstenite::connect_async(req).await.unwrap().0
+}
+
+/// Subscribes on `c` with request id `id`; returns the first Chunk's raw `values` text.
+async fn subscribe_first_chunk(c: &mut Ws, id: u64) -> String {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let req = serde_json::json!({"_tag":"Request","id":id,"tag":"subscribeAuthAccess","payload":{},"headers":[]});
+    c.send(Message::text(req.to_string())).await.unwrap();
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(20), c.next()).await;
+        let Ok(Some(Ok(Message::Text(t)))) = m else {
+            panic!("no frame: {m:?}")
+        };
+        let t = t.as_str();
+        #[derive(serde::Deserialize)]
+        struct F<'a> {
+            #[serde(rename = "_tag")]
+            tag: &'a str,
+            #[serde(rename = "requestId")]
+            id: Option<u64>,
+            #[serde(borrow)]
+            values: Option<&'a serde_json::value::RawValue>,
+        }
+        if let Ok(f) = serde_json::from_str::<F>(t)
+            && f.tag == "Chunk"
+            && f.id == Some(id)
+        {
+            let ack = format!(r#"{{"_tag":"Ack","requestId":{id}}}"#);
+            c.send(Message::text(ack)).await.unwrap();
+            return f.values.unwrap().get().to_owned();
+        }
+    }
+}
+
+fn post(base: &str, cookie: &str, path: &str, body: &str) -> serde_json::Value {
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &format!("cookie: {cookie}"),
+        "-H",
+        "content-type: application/json",
+        "-d",
+        body,
+        &format!("{base}{path}"),
+    ]);
+    assert_eq!(code, 200, "{path}: {out}");
+    serde_json::from_str(&out).unwrap()
+}
+
+fn get(base: &str, cookie: &str, path: &str) -> serde_json::Value {
+    let (code, out) = curl(&["-H", &format!("cookie: {cookie}"), &format!("{base}{path}")]);
+    assert_eq!(code, 200, "{path}: {out}");
+    serde_json::from_str(&out).unwrap()
+}
+
+/// Every column of every row of `table`, as JSON objects.
+fn dump(db: &rusqlite::Connection, table: &str) -> Vec<serde_json::Value> {
+    let mut q = db.prepare(&format!("SELECT * FROM {table}")).unwrap();
+    let names: Vec<String> = q.column_names().iter().map(|s| s.to_string()).collect();
+    q.query_map([], |r| {
+        let mut o = serde_json::Map::new();
+        for (i, n) in names.iter().enumerate() {
+            let v: Option<String> = r.get(i)?;
+            o.insert(n.clone(), serde_json::json!(v));
+        }
+        Ok(serde_json::Value::Object(o))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn auth_access_snapshot_shadow_matches_node() {
+    let Some((d, base, home, token)) = start("access-shadow") else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    // Something in each list: a labelled link, a second session (paired from another link).
+    post(
+        &base,
+        &cookie,
+        "/api/auth/pairing-token",
+        r#"{"label":"Phone"}"#,
+    );
+    let second = post(&base, &cookie, "/api/auth/pairing-token", "{}");
+    let _b = pair(&base, &home, second["credential"].as_str().unwrap());
+    post(
+        &base,
+        &cookie,
+        "/api/auth/pairing-token",
+        r#"{"scopes":["access:read"]}"#,
+    );
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (node, now, (sessions, mut links)) = rt.block_on(async {
+        let mut c = auth_ws(&port, &cookie).await;
+        let mut first = String::new();
+        for id in 1..=3 {
+            first = subscribe_first_chunk(&mut c, id).await;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        // The rows behind that snapshot, before other sockets change `last_connected_at`.
+        let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+        let rows = (dump(&db, "auth_sessions"), dump(&db, "auth_pairing_links"));
+        // A second socket of the same session, then a socket of the other session.
+        let mut c2 = auth_ws(&port, &cookie).await;
+        subscribe_first_chunk(&mut c2, 1).await;
+        let mut c3 = auth_ws(&port, &_b).await;
+        // `_b` has access:read too (standard scopes).
+        subscribe_first_chunk(&mut c3, 1).await;
+        // Rust's side of the last comparison may still be reading; the sockets must stay open.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (first, now, rows)
+    });
+    println!("Node's first chunk: {node}");
+    let (matches, mismatches) = shadow_counts(&home, "subscribeAuthAccess");
+    println!("subscribeAuthAccess shadow: {matches} match, {mismatches} mismatch");
+    assert_eq!(mismatches, 0);
+    assert_eq!(matches, 5, "every subscription compared");
+    if std::env::var_os("VEKREL_WRITE_GOLDEN").is_some() {
+        // Node's own snapshot plus the rows it came from: the offline golden.
+        let v: serde_json::Value = serde_json::from_str(&node).unwrap();
+        let current = v[0]["payload"]["clientSessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["current"] == true)
+            .unwrap()["sessionId"]
+            .clone();
+        for (i, l) in links.iter_mut().enumerate() {
+            l["credential"] = serde_json::json!(format!("REDACTED-{i}"));
+        }
+        let golden = serde_json::json!({
+            "now": now,
+            "current": current,
+            "connected": [current],
+            "auth_sessions": sessions,
+            "auth_pairing_links": links,
+            "node_values": node,
+        });
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/auth_access_snapshot.json");
+        std::fs::write(&out, serde_json::to_string_pretty(&golden).unwrap() + "\n").unwrap();
+        println!("wrote {}", out.display());
+    }
+    drop(d);
+    assert!(!home.exists());
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn auth_access_served_events_converge_to_a_fresh_snapshot() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let Some((d, base, home, token)) = start_with("access-serve", |home, _| {
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap() + "\"subscribeAuthAccess\" = \"serve\"\n";
+        std::fs::write(&cfg, t).unwrap();
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut c = rt.block_on(auth_ws(&port, &cookie));
+    let first = rt.block_on(subscribe_first_chunk(&mut c, 1));
+    let mut state = json!({});
+    let mut revisions = vec![];
+    for e in serde_json::from_str::<Vec<Value>>(&first).unwrap() {
+        revisions.push(e["revision"].as_i64().unwrap());
+        apply_auth_event(&mut state, &e);
+    }
+    // Reads events (acking each Chunk) until `quiet` passes without one.
+    let drain = |c: &mut Ws, quiet: Duration, state: &mut Value, revisions: &mut Vec<i64>| {
+        rt.block_on(async {
+            loop {
+                let Ok(m) = tokio::time::timeout(quiet, c.next()).await else {
+                    return;
+                };
+                let Some(Ok(Message::Text(t))) = m else {
+                    panic!("socket ended: {m:?}")
+                };
+                let f: Value = serde_json::from_str(t.as_str()).unwrap();
+                if f["requestId"] != 1 {
+                    continue;
+                }
+                assert_eq!(f["_tag"], "Chunk", "{f}");
+                for e in f["values"].as_array().unwrap() {
+                    revisions.push(e["revision"].as_i64().unwrap());
+                    apply_auth_event(state, e);
+                }
+                c.send(Message::text(r#"{"_tag":"Ack","requestId":1}"#))
+                    .await
+                    .unwrap();
+            }
+        })
+    };
+    let quiet = Duration::from_millis(1500);
+    // Node (its HTTP routes): create two links, revoke one, pair a second client with the other.
+    let l1 = post(
+        &base,
+        &cookie,
+        "/api/auth/pairing-token",
+        r#"{"label":"One"}"#,
+    );
+    let l2 = post(&base, &cookie, "/api/auth/pairing-token", "{}");
+    drain(&mut c, quiet, &mut state, &mut revisions);
+    post(
+        &base,
+        &cookie,
+        "/api/auth/pairing-links/revoke",
+        &json!({"id": l1["id"]}).to_string(),
+    );
+    let b = pair(&base, &home, l2["credential"].as_str().unwrap());
+    drain(&mut c, quiet, &mut state, &mut revisions);
+    // The second client connects (through Rust), then disconnects.
+    let mut cb = rt.block_on(auth_ws(&port, &b));
+    drain(&mut c, quiet, &mut state, &mut revisions);
+    let connected = |s: &Value, cookie_sid: Option<&str>| {
+        s["clientSessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["connected"] == true)
+            .filter(|x| cookie_sid.is_none_or(|id| x["sessionId"] == id))
+            .count()
+    };
+    assert_eq!(connected(&state, None), 2, "{state}");
+    rt.block_on(cb.close(None)).unwrap();
+    drop(cb);
+    drain(&mut c, quiet, &mut state, &mut revisions);
+    assert_eq!(connected(&state, None), 1, "{state}");
+    // A CLI-style direct SQL writer: a link and a session, then revokes both.
+    let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    // `toISOString` text, as Node writes it.
+    let iso = |ms: i64| {
+        db.query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?1 / 1000.0, 'unixepoch')",
+            [ms],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    db.execute(
+        "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, label, created_at, expires_at)
+         VALUES ('cli-link', 'CLICRED23456', 'one-time-token', '[\"orchestration:read\"]', 'one-time-token', 'CLI', ?1, ?2)",
+        [iso(now), iso(now + 300_000)],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO auth_sessions (session_id, subject, scopes, method, client_label, client_device_type, issued_at, expires_at)
+         VALUES ('cli-session', 'cli', '[\"orchestration:read\"]', 'bearer-access-token', 'CLI bot', 'bot', ?1, ?2)",
+        [iso(now), iso(now + 86_400_000)],
+    )
+    .unwrap();
+    drain(&mut c, quiet, &mut state, &mut revisions);
+    assert!(
+        state["pairingLinks"].to_string().contains("cli-link"),
+        "{state}"
+    );
+    assert!(
+        state["clientSessions"].to_string().contains("cli-session"),
+        "{state}"
+    );
+    db.execute(
+        "UPDATE auth_pairing_links SET revoked_at = ?1 WHERE id = 'cli-link'",
+        [iso(now + 1)],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE auth_sessions SET revoked_at = ?1 WHERE session_id = 'cli-session'",
+        [iso(now + 1)],
+    )
+    .unwrap();
+    // Node revokes the second client.
+    let b_sid = state["clientSessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["current"] == false && x["sessionId"] != "cli-session")
+        .unwrap()["sessionId"]
+        .clone();
+    post(
+        &base,
+        &cookie,
+        "/api/auth/clients/revoke",
+        &json!({"sessionId": b_sid}).to_string(),
+    );
+    // The test itself (as Rust's writers will): another link straight into the table.
+    db.execute(
+        "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at)
+         VALUES ('test-link', 'TESTCRED2345', 'one-time-token', '[\"access:read\"]', 'one-time-token', ?1, ?2)",
+        [iso(now + 2), iso(now + 300_000)],
+    )
+    .unwrap();
+    drain(&mut c, quiet, &mut state, &mut revisions);
+    // A fresh snapshot from Node's own list routes (same caller, so `current` agrees).
+    let links = get(&base, &cookie, "/api/auth/pairing-links");
+    let clients = get(&base, &cookie, "/api/auth/clients");
+    println!("final state: {state}");
+    assert_eq!(by_key(&state["pairingLinks"], "id"), by_key(&links, "id"));
+    assert_eq!(
+        by_key(&state["clientSessions"], "sessionId"),
+        by_key(&clients, "sessionId")
+    );
+    assert!(
+        revisions.windows(2).all(|w| w[1] == w[0] + 1),
+        "{revisions:?}"
+    );
+    println!(
+        "{} events, revisions 1..={}",
+        revisions.len(),
+        revisions.last().unwrap()
+    );
+    let l = log(&home);
+    assert!(!l.contains("subscribeAuthAccess declined"), "{l}");
+    assert!(!l.contains("rust handler declined"), "{l}");
+    assert!(!l.contains("deferred_unverifiable_credential"), "{l}");
+    drop(c);
+    drop(d);
+    assert!(!home.exists());
+}

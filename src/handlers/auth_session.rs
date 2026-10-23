@@ -117,6 +117,7 @@ impl RouteHandler for AuthSession {
                 .await?
                 .ok()
                 .map(|p| VerifiedSession {
+                    sid: p.session_id,
                     scopes: p.scopes,
                     method: p.method,
                     exp: p.expires_at_ms,
@@ -219,6 +220,7 @@ impl AuthSession {
         });
         match checked.await {
             Ok(Some(Ok(p))) => WsSession::Verified(VerifiedSession {
+                sid: p.sid,
                 scopes: p.scopes,
                 method: p.method,
                 exp: p.exp,
@@ -284,7 +286,7 @@ struct SessionState<'a> {
 }
 
 /// `legacyScopes` in contracts `auth.ts`.
-const LEGACY_SCOPES: [&str; 8] = [
+pub(crate) const LEGACY_SCOPES: [&str; 8] = [
     "orchestration:read",
     "orchestration:operate",
     "terminal:operate",
@@ -299,6 +301,7 @@ const LEGACY_SCOPES: [&str; 8] = [
 /// the row for a `wsTicket` (`verifyWebSocketToken`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedSession {
+    pub sid: String,
     pub scopes: Vec<String>,
     pub method: String,
     /// Epoch milliseconds.
@@ -346,6 +349,7 @@ fn verify_ticket(files: &AuthFiles, t: &str) -> WsSession {
         Some(Some(r)) if r.revoked_at.is_some() => Rejected("session_revoked"),
         Some(Some(r)) if r.subject == "mcp-client" => Rejected("mcp_client"),
         Some(Some(r)) => WsSession::Verified(VerifiedSession {
+            sid: c.sid,
             scopes: r.scopes,
             method: r.method,
             exp: r.expires_at_ms,

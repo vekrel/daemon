@@ -1,0 +1,154 @@
+//! Every `/ws` socket the proxy holds, by session: what `connected` means for sockets that reach
+//! Node through Rust, and a hook to close all of a session's sockets (on a Rust-side revoke).
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+pub struct Registry {
+    inner: Mutex<Inner>,
+    /// Bumped on every open and close.
+    changed: watch::Sender<()>,
+}
+
+#[derive(Default)]
+struct Inner {
+    next: u64,
+    /// Session id → its open sockets' close tokens.
+    sessions: HashMap<String, Vec<(u64, CancellationToken)>>,
+    /// Sockets Node accepted whose session Rust could not verify: their `connected` is unknown.
+    unattributed: usize,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Registry {
+            inner: Mutex::default(),
+            changed: watch::channel(()).0,
+        }
+    }
+}
+
+/// One open socket; dropping it unregisters the socket.
+pub struct Entry {
+    reg: Arc<Registry>,
+    sid: Option<String>,
+    id: u64,
+    /// Cancelled by `close_session`: the proxy then closes both legs.
+    pub close: CancellationToken,
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        let mut i = self.reg.lock();
+        match &self.sid {
+            None => i.unattributed -= 1,
+            Some(sid) => {
+                if let Some(v) = i.sessions.get_mut(sid) {
+                    v.retain(|(id, _)| *id != self.id);
+                    if v.is_empty() {
+                        i.sessions.remove(sid);
+                    }
+                }
+            }
+        }
+        drop(i);
+        self.reg.changed.send_replace(());
+    }
+}
+
+impl Registry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers a socket Node accepted; `sid` is its verified session (`None`: unverified).
+    pub fn open(self: &Arc<Self>, sid: Option<&str>) -> Entry {
+        let close = CancellationToken::new();
+        let mut i = self.lock();
+        i.next += 1;
+        let id = i.next;
+        match sid {
+            None => i.unattributed += 1,
+            Some(s) => i
+                .sessions
+                .entry(s.to_owned())
+                .or_default()
+                .push((id, close.clone())),
+        }
+        drop(i);
+        self.changed.send_replace(());
+        Entry {
+            reg: self.clone(),
+            sid: sid.map(str::to_owned),
+            id,
+            close,
+        }
+    }
+
+    /// Node's `connectedSessionsRef.has(sid)` for sockets that pass through Rust.
+    pub fn connected(&self, sid: &str) -> bool {
+        self.lock().sessions.contains_key(sid)
+    }
+
+    pub fn connected_ids(&self) -> Vec<String> {
+        self.lock().sessions.keys().cloned().collect()
+    }
+
+    /// Open sockets whose session is unknown to Rust.
+    pub fn unattributed(&self) -> usize {
+        self.lock().unattributed
+    }
+
+    /// Closes every socket of `sid`; returns how many.
+    pub fn close_session(&self, sid: &str) -> usize {
+        let i = self.lock();
+        let socks = i.sessions.get(sid).map_or(&[][..], Vec::as_slice);
+        socks.iter().for_each(|(_, c)| c.cancel());
+        socks.len()
+    }
+
+    /// Wakes on every open and close.
+    pub fn subscribe(&self) -> watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn open_close_connected_and_close_hook() {
+        let r = Arc::new(Registry::default());
+        let mut w = r.subscribe();
+        let a1 = r.open(Some("a"));
+        let a2 = r.open(Some("a"));
+        let b = r.open(Some("b"));
+        let u = r.open(None);
+        assert!(w.has_changed().unwrap());
+        w.mark_unchanged();
+        assert!(r.connected("a") && r.connected("b") && !r.connected("c"));
+        assert_eq!(r.unattributed(), 1);
+        let mut ids = r.connected_ids();
+        ids.sort();
+        assert_eq!(ids, ["a", "b"]);
+
+        assert_eq!(r.close_session("a"), 2);
+        assert!(a1.close.is_cancelled() && a2.close.is_cancelled());
+        assert!(!b.close.is_cancelled());
+        assert_eq!(r.close_session("c"), 0);
+
+        drop(a1);
+        assert!(w.has_changed().unwrap());
+        assert!(r.connected("a"), "one socket of a is still open");
+        drop(a2);
+        assert!(!r.connected("a"));
+        drop(u);
+        assert_eq!(r.unattributed(), 0);
+        drop(b);
+        assert!(r.connected_ids().is_empty());
+    }
+}

@@ -360,7 +360,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// Epoch ms of `YYYY-MM-DDTHH:MM:SS.sssZ` (`toISOString`).
-fn parse_iso(s: &str) -> Option<i64> {
+pub(crate) fn parse_iso(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() != 24 || b[23] != b'Z' {
         return None;

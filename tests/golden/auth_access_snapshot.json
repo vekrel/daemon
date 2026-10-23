@@ -1,0 +1,100 @@
+{
+  "now": 1792728224720,
+  "current": "96406958-b95d-453a-b0a0-9782cf94e662",
+  "connected": [
+    "96406958-b95d-453a-b0a0-9782cf94e662"
+  ],
+  "auth_sessions": [
+    {
+      "session_id": "96406958-b95d-453a-b0a0-9782cf94e662",
+      "subject": "administrative-bootstrap",
+      "scopes": "[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"]",
+      "method": "browser-session-cookie",
+      "client_label": null,
+      "client_ip_address": "127.0.0.1",
+      "client_user_agent": "curl/8.7.1",
+      "client_device_type": "bot",
+      "client_os": null,
+      "client_browser": null,
+      "issued_at": "2026-10-23T04:03:44.643Z",
+      "expires_at": "2026-11-22T04:03:44.643Z",
+      "last_connected_at": "2026-10-23T04:03:44.700Z",
+      "revoked_at": null,
+      "client_surface": null,
+      "client_app_version": null
+    },
+    {
+      "session_id": "c75aff2f-7a9b-49b7-985f-549d239de2aa",
+      "subject": "one-time-token",
+      "scopes": "[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"]",
+      "method": "browser-session-cookie",
+      "client_label": null,
+      "client_ip_address": "127.0.0.1",
+      "client_user_agent": "curl/8.7.1",
+      "client_device_type": "bot",
+      "client_os": null,
+      "client_browser": null,
+      "issued_at": "2026-10-23T04:03:44.680Z",
+      "expires_at": "2026-11-22T04:03:44.680Z",
+      "last_connected_at": null,
+      "revoked_at": null,
+      "client_surface": null,
+      "client_app_version": null
+    }
+  ],
+  "auth_pairing_links": [
+    {
+      "id": "e3fc7221-dfb2-4e5f-9c6e-4911235db5a0",
+      "credential": "REDACTED-0",
+      "method": "one-time-token",
+      "scopes": "[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"]",
+      "subject": "administrative-bootstrap",
+      "label": null,
+      "created_at": "2026-10-23T04:03:44.239Z",
+      "expires_at": "2026-10-23T04:08:44.239Z",
+      "consumed_at": "2026-10-23T04:03:44.642Z",
+      "revoked_at": null,
+      "proof_key_thumbprint": null
+    },
+    {
+      "id": "904b629d-8f9d-4630-af48-a96e2a920c4d",
+      "credential": "REDACTED-1",
+      "method": "one-time-token",
+      "scopes": "[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"]",
+      "subject": "one-time-token",
+      "label": "Phone",
+      "created_at": "2026-10-23T04:03:44.658Z",
+      "expires_at": "2026-10-23T04:08:44.658Z",
+      "consumed_at": null,
+      "revoked_at": null,
+      "proof_key_thumbprint": null
+    },
+    {
+      "id": "c9a3fa29-f982-4f2a-b6e4-567cfbfc887c",
+      "credential": "REDACTED-2",
+      "method": "one-time-token",
+      "scopes": "[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"]",
+      "subject": "one-time-token",
+      "label": null,
+      "created_at": "2026-10-23T04:03:44.670Z",
+      "expires_at": "2026-10-23T04:08:44.670Z",
+      "consumed_at": "2026-10-23T04:03:44.680Z",
+      "revoked_at": null,
+      "proof_key_thumbprint": null
+    },
+    {
+      "id": "d42f4c0d-f94a-455d-a4a5-da0fd5c877d0",
+      "credential": "REDACTED-3",
+      "method": "one-time-token",
+      "scopes": "[\"access:read\"]",
+      "subject": "one-time-token",
+      "label": null,
+      "created_at": "2026-10-23T04:03:44.691Z",
+      "expires_at": "2026-10-23T04:08:44.691Z",
+      "consumed_at": null,
+      "revoked_at": null,
+      "proof_key_thumbprint": null
+    }
+  ],
+  "node_values": "[{\"version\":1,\"revision\":1,\"type\":\"snapshot\",\"payload\":{\"pairingLinks\":[{\"id\":\"d42f4c0d-f94a-455d-a4a5-da0fd5c877d0\",\"scopes\":[\"access:read\"],\"permissions\":[\"access:read\"],\"subject\":\"one-time-token\",\"createdAt\":\"2026-10-23T04:03:44.691Z\",\"expiresAt\":\"2026-10-23T04:08:44.691Z\"},{\"id\":\"904b629d-8f9d-4630-af48-a96e2a920c4d\",\"scopes\":[\"orchestration:read\",\"orchestration:operate\",\"terminal:operate\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"],\"permissions\":[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"],\"subject\":\"one-time-token\",\"label\":\"Phone\",\"createdAt\":\"2026-10-23T04:03:44.658Z\",\"expiresAt\":\"2026-10-23T04:08:44.658Z\"}],\"clientSessions\":[{\"sessionId\":\"96406958-b95d-453a-b0a0-9782cf94e662\",\"subject\":\"administrative-bootstrap\",\"scopes\":[\"orchestration:read\",\"orchestration:operate\",\"terminal:operate\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"],\"permissions\":[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"],\"method\":\"browser-session-cookie\",\"client\":{\"ipAddress\":\"127.0.0.1\",\"userAgent\":\"curl/8.7.1\",\"deviceType\":\"bot\"},\"issuedAt\":\"2026-10-23T04:03:44.643Z\",\"expiresAt\":\"2026-11-22T04:03:44.643Z\",\"lastConnectedAt\":\"2026-10-23T04:03:44.700Z\",\"connected\":true,\"current\":true},{\"sessionId\":\"c75aff2f-7a9b-49b7-985f-549d239de2aa\",\"subject\":\"one-time-token\",\"scopes\":[\"orchestration:read\",\"orchestration:operate\",\"terminal:operate\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"],\"permissions\":[\"orchestration:read\",\"orchestration:operate\",\"settings:write\",\"providers:manage\",\"machine:maintain\",\"preview:operate\",\"diagnostics:read\",\"terminal:read\",\"terminal:operate\",\"source-control:write\",\"filesystem:read\",\"filesystem:write\",\"relay:read\",\"access:read\",\"access:write\",\"relay:write\"],\"method\":\"browser-session-cookie\",\"client\":{\"ipAddress\":\"127.0.0.1\",\"userAgent\":\"curl/8.7.1\",\"deviceType\":\"bot\"},\"issuedAt\":\"2026-10-23T04:03:44.680Z\",\"expiresAt\":\"2026-11-22T04:03:44.680Z\",\"lastConnectedAt\":null,\"connected\":false,\"current\":false}]}}]"
+}

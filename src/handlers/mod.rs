@@ -1,5 +1,6 @@
 //! Rust answers for requests Node would otherwise handle. See `http_seam` and `rpc_seam` for how
 //! they are wired.
+pub mod auth_access;
 pub mod auth_session;
 pub mod browse;
 pub mod machine_descriptor;

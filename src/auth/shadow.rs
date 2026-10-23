@@ -123,6 +123,10 @@ impl AuthFiles {
         self.key_path.parent()
     }
 
+    pub fn db_path(&self) -> &std::path::Path {
+        &self.db_path
+    }
+
     pub fn new(key_path: PathBuf, db_path: PathBuf) -> Self {
         AuthFiles {
             key_path,

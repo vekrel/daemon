@@ -1,8 +1,10 @@
-//! WS takeover for unary RPCs: per-tag Rust handlers in `shadow` (Node answers, Rust's Exit is
-//! compared with Node's and logged) or `serve` (Rust answers, Node never sees the request) mode.
+//! WS takeover for RPCs: per-tag Rust handlers in `shadow` (Node answers, Rust's Exit, or a
+//! stream's first Chunk, is compared with Node's and logged) or `serve` (Rust answers, Node never
+//! sees the request) mode.
 //! Routing follows research section 4: frames Rust does not own are forwarded as the original
 //! bytes, and the proxy's pump is the only writer to the client socket.
 use crate::{
+    auth::registry::Registry,
     config::{Mode, RustConfig},
     handlers::{
         HandlerCtx, VerifiedSession,
@@ -12,15 +14,18 @@ use crate::{
     http_seam::{ShadowLimit, json_path},
 };
 use axum::http::HeaderMap;
-use futures_util::future::BoxFuture;
+use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::BoxStream};
 use serde::Deserialize;
 use serde_json::{Value, json, value::RawValue};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
 /// A Rust answer for one RPC tag. Handlers must be read-only and idempotent: a served request
@@ -42,9 +47,48 @@ pub trait UnaryHandler: Send + Sync {
     ) -> BoxFuture<'a, Option<Result<Value, Value>>>;
 }
 
+/// A stream's Chunks: each `Ok` is one Chunk's `values` (never empty); an `Err` ends the stream
+/// with Exit Failure `[{_tag:"Fail",error}]`; the end of the stream is Exit Success `null`.
+pub type Chunks = BoxStream<'static, Result<Vec<Value>, Value>>;
+
+/// A Rust producer for one streaming RPC tag. Like Node, the seam sends a Chunk only after the
+/// client acked the previous one, and drops the producer on Interrupt or socket close.
+pub trait StreamHandler: Send + Sync {
+    fn tag(&self) -> &'static str;
+    fn default_mode(&self) -> Mode {
+        Mode::Shadow
+    }
+    fn required_scope(&self) -> &'static str;
+    /// `None`: not mine, Node answers (decline happens before the first Chunk or never).
+    fn open<'a>(&'a self, payload: Value, ctx: &'a HandlerCtx) -> BoxFuture<'a, Option<Chunks>>;
+}
+
+#[derive(Clone)]
+enum Handler {
+    Unary(Arc<dyn UnaryHandler>),
+    Stream(Arc<dyn StreamHandler>),
+}
+
+impl Handler {
+    fn tag(&self) -> &'static str {
+        match self {
+            Handler::Unary(h) => h.tag(),
+            Handler::Stream(h) => h.tag(),
+        }
+    }
+    fn required_scope(&self) -> &'static str {
+        match self {
+            Handler::Unary(h) => h.required_scope(),
+            Handler::Stream(h) => h.required_scope(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Seam {
-    handlers: Vec<(Arc<dyn UnaryHandler>, Mode)>,
+    handlers: Vec<(Handler, Mode)>,
+    /// Every proxied socket by verified session (`connected`, close hook).
+    registry: Arc<Registry>,
     pub ctx: HandlerCtx,
     /// Verifies the connection's session; without it every session is deferred to Node.
     auth: Option<Arc<AuthSession>>,
@@ -61,11 +105,32 @@ impl std::fmt::Debug for Seam {
 
 impl Seam {
     pub fn new(handlers: Vec<(Arc<dyn UnaryHandler>, Mode)>) -> Self {
-        let handlers = handlers.into_iter().filter(|h| h.1 != Mode::Off).collect();
+        let handlers = handlers
+            .into_iter()
+            .filter(|h| h.1 != Mode::Off)
+            .map(|(h, m)| (Handler::Unary(h), m))
+            .collect();
         Seam {
             handlers,
             ..Seam::default()
         }
+    }
+
+    pub fn with_stream(mut self, mode: Mode, h: Arc<dyn StreamHandler>) -> Self {
+        if mode != Mode::Off {
+            self.handlers.push((Handler::Stream(h), mode));
+        }
+        self
+    }
+
+    /// Shares `registry` (the one stream handlers read `connected` from).
+    pub fn with_registry(mut self, registry: Arc<Registry>) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
     }
 
     /// Each handler in its `[rust.handlers]` mode, else its `default_mode`.
@@ -124,7 +189,7 @@ impl Seam {
         Some(crate::auth::ticket::issue(sid, now.as_millis() as i64, &key).0)
     }
 
-    fn find(&self, tag: &str) -> Option<(&Arc<dyn UnaryHandler>, Mode)> {
+    fn find(&self, tag: &str) -> Option<(&Handler, Mode)> {
         self.handlers
             .iter()
             .find(|(h, _)| h.tag() == tag)
@@ -170,12 +235,26 @@ fn exit_frame(id: &Value, exit: &Value) -> String {
     json!({"_tag": "Exit", "requestId": id, "exit": exit}).to_string()
 }
 
-/// A finished handler, reported back to the connection's pump.
+/// A finished handler (or a stream's Chunk), reported back to the connection's pump.
 pub(crate) struct Done {
     key: String,
     id: Value,
-    /// `None`: the handler declined, or a shadow computation timed out or panicked.
+    /// `None`: the handler declined, or a shadow computation timed out or panicked. For a shadow
+    /// stream: its first Chunk's `values` array (or its Exit).
     exit: Option<Value>,
+    /// A served stream's Chunk `values`; `exit` is then unused.
+    chunk: Option<Vec<Value>>,
+}
+
+impl Done {
+    fn exit(key: String, id: Value, exit: Option<Value>) -> Done {
+        Done {
+            key,
+            id,
+            exit,
+            chunk: None,
+        }
+    }
 }
 
 /// Where a finished handler's frame goes.
@@ -187,6 +266,8 @@ pub(crate) enum Out {
 
 struct Shadowed {
     tag: &'static str,
+    /// A stream: Node's first Chunk `values` (or its Exit, if that comes first) is compared.
+    stream: bool,
     /// Rust's encoding of its exit.
     rust: Option<String>,
     /// Node's `exit`, exactly as it appeared in Node's frame.
@@ -207,6 +288,8 @@ struct NodeMsg<'a> {
     request_id: Option<&'a RawValue>,
     #[serde(borrow)]
     exit: Option<&'a RawValue>,
+    #[serde(borrow)]
+    values: Option<&'a RawValue>,
 }
 
 fn interrupted() -> Value {
@@ -231,12 +314,20 @@ pub(crate) enum Fwd {
     Nothing,
 }
 
+/// A served request in flight.
+struct Owned {
+    cancel: CancellationToken,
+    /// The request text, forwarded to Node on decline.
+    raw: String,
+    /// A stream's Ack signal: the producer waits for one per Chunk.
+    ack: Option<UnboundedSender<()>>,
+}
+
 /// Per-connection routing state. Keys are the request id's JSON text.
 pub(crate) struct Conn {
     seam: Arc<Seam>,
     session: WsSession,
-    /// Served requests in flight: their cancel token and the request text to forward on decline.
-    owned: HashMap<String, (CancellationToken, String)>,
+    owned: HashMap<String, Owned>,
     shadow: HashMap<String, Shadowed>,
     done: UnboundedSender<Done>,
     limit: ShadowLimit,
@@ -247,7 +338,7 @@ impl Drop for Conn {
         let shadowed = self.shadow.values().map(|s| &s.cancel);
         self.owned
             .values()
-            .map(|o| &o.0)
+            .map(|o| &o.cancel)
             .chain(shadowed)
             .for_each(|c| c.cancel());
     }
@@ -303,17 +394,25 @@ impl Conn {
         let key = m.get("requestId").map(Value::to_string);
         match m.get("_tag").and_then(Value::as_str) {
             Some("Request") => self.request(m, raw, out),
-            Some("Ack") => key.is_some_and(|k| self.owned.contains_key(&k)),
+            Some("Ack") => {
+                let Some(o) = key.and_then(|k| self.owned.get(&k)) else {
+                    return false;
+                };
+                if let Some(a) = &o.ack {
+                    let _ = a.send(());
+                }
+                true
+            }
             Some("Interrupt") => {
                 let Some(k) = key else { return false };
                 if let Some(s) = self.shadow.remove(&k) {
                     s.cancel.cancel(); // Node answers the Interrupt; nothing to compare.
                     return false;
                 }
-                let Some((cancel, _)) = self.owned.remove(&k) else {
+                let Some(o) = self.owned.remove(&k) else {
                     return false;
                 };
-                cancel.cancel();
+                o.cancel.cancel();
                 out.push(exit_frame(&m["requestId"], &interrupted()));
                 true
             }
@@ -361,15 +460,27 @@ impl Conn {
                 };
                 // An array element is re-encoded, like the remainder of a split array frame.
                 let raw = raw.map_or_else(|| m.to_string(), str::to_owned);
-                self.owned.insert(key.clone(), (cancel.clone(), raw));
-                let task = tokio::spawn(self.run(h, payload, s, cancel, "serve"));
-                let done = self.done.clone();
-                let id = id.clone();
-                tokio::spawn(async move {
-                    // A panic declines: Node answers (handlers are read-only, so rerunning is safe).
-                    let exit = task.await.ok().flatten();
-                    let _ = done.send(Done { key, id, exit });
-                });
+                let (done, id) = (self.done.clone(), id.clone());
+                let ack = match h {
+                    Handler::Unary(h) => {
+                        let task = tokio::spawn(self.run(h, payload, s, cancel.clone(), "serve"));
+                        let key = key.clone();
+                        tokio::spawn(async move {
+                            // A panic declines: Node answers (handlers are read-only, so rerunning is safe).
+                            let exit = task.await.ok().flatten();
+                            let _ = done.send(Done::exit(key, id, exit));
+                        });
+                        None
+                    }
+                    Handler::Stream(h) => {
+                        let (ack, acks) = unbounded_channel();
+                        let ctx = self.ctx(s, cancel.clone());
+                        tokio::spawn(produce(h, payload, ctx, acks, key.clone(), id, done));
+                        Some(ack)
+                    }
+                };
+                let o = Owned { cancel, raw, ack };
+                self.owned.insert(key, o);
                 true
             }
             Mode::Shadow => {
@@ -382,6 +493,7 @@ impl Conn {
                 });
                 let mut entry = Shadowed {
                     tag: h.tag(),
+                    stream: matches!(h, Handler::Stream(_)),
                     rust: None,
                     node: None,
                     cancel: cancel.clone(),
@@ -390,14 +502,19 @@ impl Conn {
                 match session {
                     None => entry.rust = Some(denied().to_string()),
                     Some(s) => {
-                        let run = self.run(h, payload, s, cancel, "shadow");
+                        let run = match h {
+                            Handler::Unary(h) => self.run(h, payload, s, cancel, "shadow").boxed(),
+                            Handler::Stream(h) => {
+                                first_chunk(h, payload, self.ctx(s, cancel)).boxed()
+                            }
+                        };
                         let Some(task) = self.limit.spawn(entry.tag, run) else {
                             return false;
                         };
                         let (done, key, id) = (self.done.clone(), key.clone(), id.clone());
                         tokio::spawn(async move {
                             let exit = task.await.ok().flatten();
-                            let _ = done.send(Done { key, id, exit });
+                            let _ = done.send(Done::exit(key, id, exit));
                         });
                     }
                 }
@@ -405,6 +522,14 @@ impl Conn {
                 false
             }
             Mode::Off => false,
+        }
+    }
+
+    fn ctx(&self, session: VerifiedSession, cancel: CancellationToken) -> HandlerCtx {
+        HandlerCtx {
+            session: Some(session),
+            cancel,
+            ..self.seam.ctx.clone()
         }
     }
 
@@ -417,11 +542,7 @@ impl Conn {
         cancel: CancellationToken,
         mode: &'static str,
     ) -> impl Future<Output = Option<Value>> + Send + 'static {
-        let ctx = HandlerCtx {
-            session: Some(session),
-            cancel: cancel.clone(),
-            ..self.seam.ctx.clone()
-        };
+        let ctx = self.ctx(session, cancel.clone());
         async move {
             // Cancellation drops the handler even if it never looks at the token.
             let r = tokio::select! {
@@ -447,10 +568,17 @@ impl Conn {
 
     /// A handler finished: for a served request still owned, its Exit, or the request for Node.
     pub(crate) fn done(&mut self, d: Done) -> Option<Out> {
-        if let Some((_, raw)) = self.owned.remove(&d.key) {
+        if let Some(values) = d.chunk {
+            // Dropped once the request is no longer owned (interrupted).
+            return self.owned.contains_key(&d.key).then(|| {
+                let c = json!({"_tag": "Chunk", "requestId": d.id, "values": values});
+                Out::Client(c.to_string())
+            });
+        }
+        if let Some(o) = self.owned.remove(&d.key) {
             return Some(match d.exit {
                 Some(e) => Out::Client(exit_frame(&d.id, &e)),
-                None => Out::Node(raw),
+                None => Out::Node(o.raw),
             });
         }
         match d.exit {
@@ -467,7 +595,11 @@ impl Conn {
 
     /// Watches Node's frames for the Exits of shadowed requests.
     pub(crate) fn s2c(&mut self, text: &str) {
-        if self.shadow.is_empty() || !text.contains("\"Exit\"") {
+        if self.shadow.is_empty() {
+            return;
+        }
+        let chunk = text.contains("\"Chunk\"") && self.shadow.values().any(|s| s.stream);
+        if !chunk && !text.contains("\"Exit\"") {
             return;
         }
         let msgs = if text.trim_start().starts_with('[') {
@@ -476,16 +608,24 @@ impl Conn {
             serde_json::from_str::<NodeMsg>(text).map(|m| vec![m])
         };
         for m in msgs.into_iter().flatten() {
-            let (Some("Exit"), Some(id), Some(exit)) = (m.tag, m.request_id, m.exit) else {
+            let (Some(tag), Some(id)) = (m.tag, m.request_id) else {
                 continue;
+            };
+            let (stream, raw) = match (tag, m.exit, m.values) {
+                ("Exit", Some(exit), _) => (false, exit),
+                ("Chunk", _, Some(values)) => (true, values),
+                _ => continue,
             };
             // Same key as the request's: the id's JSON as serde writes it.
             let Ok(id) = serde_json::from_str::<Value>(id.get()) else {
                 continue;
             };
             let key = id.to_string();
-            if let Some(s) = self.shadow.get_mut(&key) {
-                s.node = Some(exit.get().to_owned());
+            if let Some(s) = self.shadow.get_mut(&key)
+                && (s.stream || !stream)
+                && s.node.is_none()
+            {
+                s.node = Some(raw.get().to_owned());
                 self.settle(key);
             }
         }
@@ -510,6 +650,95 @@ impl Conn {
             tracing::warn!(tag, outcome = "mismatch", path, "rust shadow");
         }
         self.shadow.remove(&key);
+    }
+}
+
+/// Runs a served stream: one Chunk, then wait for its Ack, until the end, an error, an Interrupt
+/// or the socket closing (`ctx.cancel`). A decline or a panic before the first Chunk forwards the
+/// request to Node; a panic later ends the stream as interrupted.
+async fn produce(
+    h: Arc<dyn StreamHandler>,
+    payload: Value,
+    ctx: HandlerCtx,
+    mut acks: tokio::sync::mpsc::UnboundedReceiver<()>,
+    key: String,
+    id: Value,
+    done: UnboundedSender<Done>,
+) {
+    let cancel = ctx.cancel.clone();
+    let sent = Arc::new(AtomicBool::new(false));
+    let (tx, flag) = (done.clone(), sent.clone());
+    let (k, i) = (key.clone(), id.clone());
+    let task = tokio::spawn(async move {
+        let chunks = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return None,
+            c = h.open(payload, &ctx) => c,
+        };
+        let Some(mut chunks) = chunks else {
+            tracing::info!(
+                tag = h.tag(),
+                mode = "serve",
+                outcome = "declined",
+                "rust handler declined"
+            );
+            return Some(None);
+        };
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return None,
+                i = chunks.next() => i,
+            };
+            match item {
+                Some(Ok(values)) => {
+                    let d = Done {
+                        key: k.clone(),
+                        id: i.clone(),
+                        exit: None,
+                        chunk: Some(values),
+                    };
+                    flag.store(true, Ordering::SeqCst);
+                    if tx.send(d).is_err() {
+                        return None;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return None,
+                        a = acks.recv() => { a?; }
+                    }
+                }
+                Some(Err(e)) => return Some(Some(failure(json!({"_tag": "Fail", "error": e})))),
+                None => return Some(Some(success(Value::Null))),
+            }
+        }
+    });
+    let exit = match task.await {
+        Ok(None) => return, // interrupted or closed: the pump already answered
+        Ok(Some(exit)) => exit,
+        Err(_) if sent.load(Ordering::SeqCst) => Some(interrupted()),
+        Err(_) => None,
+    };
+    let _ = done.send(Done::exit(key, id, exit));
+}
+
+/// Shadow: the stream's first Chunk `values` (or its Exit), then the producer is dropped.
+async fn first_chunk(h: Arc<dyn StreamHandler>, payload: Value, ctx: HandlerCtx) -> Option<Value> {
+    let cancel = ctx.cancel.clone();
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        v = async {
+            let Some(mut chunks) = h.open(payload, &ctx).await else {
+                tracing::info!(tag = h.tag(), mode = "shadow", outcome = "declined", "rust handler declined");
+                return None;
+            };
+            Some(match chunks.next().await {
+                Some(Ok(values)) => Value::Array(values),
+                Some(Err(e)) => failure(json!({"_tag": "Fail", "error": e})),
+                None => success(Value::Null),
+            })
+        } => v,
     }
 }
 

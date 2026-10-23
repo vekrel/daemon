@@ -3,7 +3,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
-    handlers::{HandlerCtx, auth_session, browse, machine_descriptor, read_file, ws_ticket},
+    handlers::{
+        HandlerCtx, auth_access, auth_session, browse, machine_descriptor, read_file, ws_ticket,
+    },
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
@@ -97,6 +99,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // Without it (unsupported engine config) WS sessions are deferred: serve forwards to Node.
                 rpc = rpc.with_auth(auth);
+                let tailscale =
+                    auth_access::tailscale_serve(&cfg.engine.args, |k| std::env::var(k).ok());
+                let access =
+                    auth_access::AuthAccess::new(files.clone(), rpc.registry().clone(), tailscale);
+                let h: Arc<dyn rpc_seam::StreamHandler> = Arc::new(access);
+                let mode = cfg.rust.mode(h.tag(), h.default_mode());
+                rpc = rpc.with_stream(mode, h);
             }
         }
         let cwd = seam.ctx.cwd.clone();

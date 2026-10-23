@@ -41,7 +41,7 @@ use vekrel::{
     },
     http_seam::ShadowLimit,
     proxy_ws::{Dir, FrameTap},
-    rpc_seam::{Seam, UnaryHandler},
+    rpc_seam::{Chunks, Seam, StreamHandler, UnaryHandler},
     server,
     supervisor::State,
 };
@@ -222,6 +222,11 @@ async fn upstream(ev: UnboundedSender<String>) -> u16 {
                                 let c = json!({"_tag":"Chunk","requestId":r["id"],"values":[{"i":i,"blob":blob}]});
                                 s.send(AxMsg::Text(c.to_string().into())).await.unwrap();
                             }
+                        }
+                        // `nodeChunks`: Node's Chunks (one per element) before its Exit.
+                        for v in p["nodeChunks"].as_array().into_iter().flatten() {
+                            let c = json!({"_tag":"Chunk","requestId":r["id"],"values":v});
+                            s.send(AxMsg::Text(c.to_string().into())).await.unwrap();
                         }
                         let value = p.get("node").unwrap_or(p);
                         let mut e = json!({"_tag":"Exit","requestId":r["id"],"exit":{"_tag":"Success","value":value}}).to_string();
@@ -1017,4 +1022,436 @@ async fn serve_with_ws_ticket_answers_with_row_scopes_and_logs_verdict() {
         "{v:?}"
     );
     assert!(logs.lines("deferred_unverifiable_credential").is_empty());
+}
+
+// ---- streams ----
+
+/// `test.stream` (`filesystem:read`): Chunk `i` is `[{"i":i}]`, forever, or `payload.end` chunks
+/// then the end; `{"fail":e}` fails with `e` after one chunk; `{"decline":true}` declines.
+/// `pulled` counts items the seam took; `dropped` is set when the producer is dropped.
+#[derive(Default)]
+struct Counter {
+    pulled: Arc<std::sync::atomic::AtomicUsize>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl StreamHandler for Counter {
+    fn tag(&self) -> &'static str {
+        "test.stream"
+    }
+    fn required_scope(&self) -> &'static str {
+        "filesystem:read"
+    }
+    fn open<'a>(&'a self, payload: Value, ctx: &'a HandlerCtx) -> BoxFuture<'a, Option<Chunks>> {
+        async move {
+            assert!(ctx.session.is_some());
+            if payload.get("decline").is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                return None;
+            }
+            let (pulled, guard) = (self.pulled.clone(), SetOnDrop(self.dropped.clone()));
+            let end = payload["end"].as_u64();
+            let fail = payload.get("fail").cloned();
+            let s = futures_util::stream::unfold(0u64, move |i| {
+                let _keep = &guard;
+                let n = pulled.fetch_add(1, Ordering::SeqCst);
+                let item = match (&fail, end) {
+                    (Some(e), _) if i == 1 => Some(Err(e.clone())),
+                    (Some(_), _) if i > 1 => None,
+                    (_, Some(end)) if i >= end => None,
+                    _ => Some(Ok(vec![json!({"i": i})])),
+                };
+                let _ = n;
+                async move { item.map(|it| (it, i + 1)) }
+            });
+            Some(Box::pin(s) as Chunks)
+        }
+        .boxed()
+    }
+}
+
+fn stream_seam(mode: Mode, h: Arc<Counter>, e: &Env) -> Seam {
+    Seam::new(vec![]).with_stream(mode, h).with_auth(auth(e))
+}
+
+fn chunk(id: u64, values: &str) -> String {
+    format!(r#"{{"_tag":"Chunk","requestId":{id},"values":{values}}}"#)
+}
+
+fn ack(id: u64) -> String {
+    format!(r#"{{"_tag":"Ack","requestId":{id}}}"#)
+}
+
+async fn assert_quiet(c: &mut Client) {
+    let r = tokio::time::timeout(Duration::from_millis(200), c.next()).await;
+    assert!(r.is_err(), "unexpected frame {r:?}");
+}
+
+#[tokio::test]
+async fn serve_stream_sends_the_next_chunk_only_after_its_ack() {
+    let e = env("st-ack", "[]");
+    let h = Arc::new(Counter::default());
+    let mut r = rig(stream_seam(Mode::Serve, h.clone(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.stream", json!({}))).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":0}]"#));
+    assert_quiet(&mut c).await;
+    assert_eq!(
+        h.pulled.load(Ordering::SeqCst),
+        1,
+        "no item pulled before the Ack"
+    );
+    send(&mut c, &ack(1)).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":1}]"#));
+    assert_quiet(&mut c).await;
+    send(&mut c, &ack(1)).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":2}]"#));
+    // Acks are Rust's: Node never sees the request or the Acks.
+    barrier(&mut r, &mut c, 9).await;
+    assert!(r.ev.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn serve_stream_end_and_failure_exits() {
+    let e = env("st-end", "[]");
+    let h = Arc::new(Counter::default());
+    let r = rig(stream_seam(Mode::Serve, h.clone(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.stream", json!({"end":1}))).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":0}]"#));
+    send(&mut c, &ack(1)).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(1, r#"{"_tag":"Success","value":null}"#)
+    );
+    send(
+        &mut c,
+        &request(2, "test.stream", json!({"fail":{"_tag":"E","message":"m"}})),
+    )
+    .await;
+    assert_eq!(recv(&mut c).await, chunk(2, r#"[{"i":0}]"#));
+    send(&mut c, &ack(2)).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(
+            2,
+            r#"{"_tag":"Failure","cause":[{"_tag":"Fail","error":{"_tag":"E","message":"m"}}]}"#
+        )
+    );
+}
+
+#[tokio::test]
+async fn interrupt_mid_stream_exits_interrupt_and_drops_the_producer() {
+    let e = env("st-int", "[]");
+    let h = Arc::new(Counter::default());
+    let mut r = rig(stream_seam(Mode::Serve, h.clone(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.stream", json!({}))).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":0}]"#));
+    send(&mut c, r#"{"_tag":"Interrupt","requestId":1}"#).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(
+            1,
+            r#"{"_tag":"Failure","cause":[{"_tag":"Interrupt","fiberId":0}]}"#
+        )
+    );
+    for _ in 0..100 {
+        if h.dropped.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(h.dropped.load(Ordering::SeqCst), "producer dropped");
+    // A late Ack for the interrupted id is no longer Rust's: it goes to Node untouched.
+    send(&mut c, &ack(1)).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{}", ack(1)));
+    assert_quiet(&mut c).await;
+}
+
+#[tokio::test]
+async fn socket_close_drops_the_producer() {
+    let e = env("st-close", "[]");
+    let h = Arc::new(Counter::default());
+    let r = rig(stream_seam(Mode::Serve, h.clone(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.stream", json!({}))).await;
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":0}]"#));
+    c.close(None).await.unwrap();
+    drop(c);
+    for _ in 0..100 {
+        if h.dropped.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        h.dropped.load(Ordering::SeqCst),
+        "producer dropped on close"
+    );
+    drop(r);
+}
+
+#[tokio::test]
+async fn stream_decline_before_the_first_chunk_forwards_the_original_bytes() {
+    let e = env("st-decl", "[]");
+    let mut r = rig(stream_seam(Mode::Serve, Arc::default(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    // Odd spacing: Node must get exactly these bytes.
+    let req = r#"{ "_tag":"Request","id":4,"tag":"test.stream","payload":{"decline":true,"nodeChunks":[["n"]],"node":"done"},"headers":[] }"#;
+    send(&mut c, req).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
+    assert_eq!(recv(&mut c).await, chunk(4, r#"["n"]"#));
+    // Node owns the stream now: the Ack is forwarded.
+    send(&mut c, &ack(4)).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{}", ack(4)));
+}
+
+#[tokio::test]
+async fn serve_stream_without_scope_is_the_authorization_error() {
+    let e = env("st-scope", "[]");
+    let mut r = rig(stream_seam(Mode::Serve, Arc::default(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["orchestration:read"]))]).await;
+    send(&mut c, &request(1, "test.stream", json!({}))).await;
+    assert_eq!(recv(&mut c).await, exit(1, AUTH_ERROR));
+    assert!(r.ev.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn shadow_stream_compares_only_the_first_chunk() {
+    let (logs, _g) = Logs::capture();
+    let e = env("st-shadow", "[]");
+    let h = Arc::new(Counter::default());
+    let mut r = rig(stream_seam(Mode::Shadow, h.clone(), &e)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    // Node's first chunk equals Rust's; its second differs and is not compared.
+    let req = request(
+        1,
+        "test.stream",
+        json!({"nodeChunks":[[{"i":0}],[{"i":9}]]}),
+    );
+    send(&mut c, &req).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":0}]"#));
+    send(&mut c, &ack(1)).await;
+    assert_eq!(
+        next_ev(&mut r).await,
+        format!("text:{}", ack(1)),
+        "Node's Ack"
+    );
+    assert_eq!(recv(&mut c).await, chunk(1, r#"[{"i":9}]"#));
+    let _ = recv(&mut c).await; // Node's Exit
+    // A differing snapshot.
+    let req = request(2, "test.stream", json!({"nodeChunks":[[{"i":1}]]}));
+    send(&mut c, &req).await;
+    let _ = next_ev(&mut r).await;
+    assert_eq!(recv(&mut c).await, chunk(2, r#"[{"i":1}]"#));
+    let _ = recv(&mut c).await; // Node's Exit
+    barrier(&mut r, &mut c, 3).await;
+    for _ in 0..100 {
+        if h.dropped.load(Ordering::SeqCst) && logs.lines("rust shadow").len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let lines = logs.lines("rust shadow");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains("outcome=\"match\""), "{lines:?}");
+    assert!(
+        lines[1].contains("mismatch") && lines[1].contains("$[0].i"),
+        "{lines:?}"
+    );
+    assert!(
+        h.dropped.load(Ordering::SeqCst),
+        "Rust's shadow producer stops after one chunk"
+    );
+}
+
+// ---- registry and subscribeAuthAccess end to end ----
+
+#[tokio::test]
+async fn registry_tracks_proxied_sockets_and_closes_a_session() {
+    let e = env("reg", r#"["filesystem:read"]"#);
+    let s = seam(Mode::Serve, Arc::default(), Some(auth(&e)));
+    let reg = s.registry().clone();
+    let r = rig(s).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    let mut u = connect(r.proxy, "", &[]).await; // Node accepted it; Rust cannot tell whose it is
+    send(&mut c, &request(1, "test.echo", json!(1))).await;
+    let _ = recv(&mut c).await; // the socket is registered by now
+    assert!(reg.connected(SID));
+    assert_eq!(reg.unattributed(), 1);
+    assert_eq!(reg.close_session(SID), 1);
+    match tokio::time::timeout(Duration::from_secs(5), c.next()).await {
+        Ok(Some(Ok(Message::Close(Some(f))))) => assert_eq!(u16::from(f.code), 1008),
+        other => panic!("expected a close frame, got {other:?}"),
+    }
+    for _ in 0..100 {
+        if !reg.connected(SID) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!reg.connected(SID), "unregistered once the pump ended");
+    u.close(None).await.unwrap();
+    for _ in 0..100 {
+        if reg.unattributed() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(reg.unattributed(), 0);
+}
+
+/// The engine's two auth tables (migrations 031, 032, 041).
+const FULL_DDL: &str = "
+    CREATE TABLE auth_sessions (
+      session_id TEXT PRIMARY KEY, subject TEXT NOT NULL, scopes TEXT NOT NULL, method TEXT NOT NULL,
+      client_label TEXT, client_ip_address TEXT, client_user_agent TEXT,
+      client_device_type TEXT NOT NULL DEFAULT 'unknown', client_os TEXT, client_browser TEXT,
+      issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_connected_at TEXT, revoked_at TEXT,
+      client_surface TEXT, client_app_version TEXT);
+    CREATE TABLE auth_pairing_links (
+      id TEXT PRIMARY KEY, credential TEXT NOT NULL UNIQUE, method TEXT NOT NULL, scopes TEXT NOT NULL,
+      subject TEXT NOT NULL, label TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+      consumed_at TEXT, revoked_at TEXT, proof_key_thumbprint TEXT);";
+
+fn access_env() -> (tempfile::TempDir, Arc<AuthFiles>, rusqlite::Connection) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("key.bin"), KEY).unwrap();
+    let c = rusqlite::Connection::open(dir.path().join("db.sqlite")).unwrap();
+    c.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+    c.execute_batch(FULL_DDL).unwrap();
+    c.execute(
+        "INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
+         VALUES (?1, 'browser', '[\"access:read\"]', 'browser-session-cookie',
+                 '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+        [SID],
+    )
+    .unwrap();
+    let files = Arc::new(AuthFiles::new(
+        dir.path().join("key.bin"),
+        dir.path().join("db.sqlite"),
+    ));
+    (dir, files, c)
+}
+
+fn access_seam(mode: Mode, files: &Arc<AuthFiles>) -> Seam {
+    let a = Arc::new(AuthSession::new(
+        Descriptor::web("127.0.0.1", 3789, STATE_DIR, ""),
+        files.clone(),
+    ));
+    let s = Seam::new(vec![]).with_auth(a);
+    let h =
+        vekrel::handlers::auth_access::AuthAccess::new(files.clone(), s.registry().clone(), false);
+    s.with_stream(mode, Arc::new(h))
+}
+
+fn values(frame: &str) -> Vec<Value> {
+    let v: Value = serde_json::from_str(frame).unwrap();
+    assert_eq!(v["_tag"], "Chunk", "{frame}");
+    v["values"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn auth_access_serves_snapshot_then_db_and_socket_events() {
+    let (_dir, files, w) = access_env();
+    let r = rig(access_seam(Mode::Serve, &files)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    send(&mut c, &request(1, "subscribeAuthAccess", json!({}))).await;
+    let snap = values(&recv(&mut c).await);
+    assert_eq!(
+        snap[0].to_string(),
+        format!(
+            r#"{{"version":1,"revision":1,"type":"snapshot","payload":{{"pairingLinks":[],"clientSessions":[{{"sessionId":"{SID}","subject":"browser","scopes":["access:read"],"permissions":["access:read"],"method":"browser-session-cookie","client":{{"deviceType":"unknown"}},"issuedAt":"2026-01-01T00:00:00.000Z","expiresAt":"2099-01-01T00:00:00.000Z","lastConnectedAt":null,"connected":true,"current":true}}]}}}}"#
+        )
+    );
+    // A CLI-style writer adds a link before the Ack: nothing is sent until the Ack.
+    w.execute(
+        "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at)
+         VALUES ('l1', 'C1', 'one-time-token', '[\"access:read\"]', 'one-time-token',
+                 '2026-01-02T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+    assert_quiet(&mut c).await;
+    send(&mut c, &ack(1)).await;
+    let ev = values(&recv(&mut c).await);
+    assert_eq!(
+        ev[0].to_string(),
+        r#"{"version":1,"revision":2,"type":"pairingLinkUpserted","payload":{"id":"l1","scopes":["access:read"],"permissions":["access:read"],"subject":"one-time-token","createdAt":"2026-01-02T00:00:00.000Z","expiresAt":"2099-01-01T00:00:00.000Z"}}"#
+    );
+    send(&mut c, &ack(1)).await;
+    // A second socket of another session connects: it appears connected; revoking it removes it.
+    let other = "6f1c0d3e-0000-4000-8000-000000000002";
+    w.execute(
+        "INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
+         VALUES (?1, 'browser', '[\"orchestration:read\"]', 'bearer-access-token',
+                 '2026-01-03T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+        [other],
+    )
+    .unwrap();
+    let ev = values(&recv(&mut c).await);
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["type"], "clientUpserted");
+    assert_eq!(ev[0]["revision"], 3);
+    assert_eq!(ev[0]["payload"]["connected"], false);
+    send(&mut c, &ack(1)).await;
+    w.execute(
+        "UPDATE auth_pairing_links SET consumed_at = '2026-01-04T00:00:00.000Z' WHERE id = 'l1'",
+        [],
+    )
+    .unwrap();
+    w.execute(
+        "UPDATE auth_sessions SET revoked_at = '2026-01-04T00:00:00.000Z' WHERE session_id = ?1",
+        [other],
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    while got.len() < 2 {
+        got.extend(values(&recv(&mut c).await));
+        send(&mut c, &ack(1)).await;
+    }
+    assert_eq!(
+        got[0].to_string(),
+        r#"{"version":1,"revision":4,"type":"pairingLinkRemoved","payload":{"id":"l1"}}"#
+    );
+    assert_eq!(
+        got[1].to_string(),
+        format!(
+            r#"{{"version":1,"revision":5,"type":"clientRemoved","payload":{{"sessionId":"{other}"}}}}"#
+        )
+    );
+    // A second socket of the same session: no change in `connected`, so no event.
+    let mut c2 = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    send(&mut c2, &request(1, "other", json!({}))).await;
+    let _ = recv(&mut c2).await;
+    assert_quiet(&mut c).await;
+}
+
+#[tokio::test]
+async fn auth_access_declines_when_a_socket_or_link_may_bypass_rust() {
+    let (dir, files, _w) = access_env();
+    let s = access_seam(Mode::Serve, &files);
+    let reg = s.registry().clone();
+    let mut r = rig(s).await;
+    // An unverified socket is open: its session's `connected` is unknowable.
+    let _u = connect(r.proxy, "", &[]).await;
+    for _ in 0..100 {
+        if reg.unattributed() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    let req = request(1, "subscribeAuthAccess", json!({"node":"node"}));
+    send(&mut c, &req).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
+    drop(_u);
+    // A cloud link: sockets may come through the tunnel.
+    std::fs::write(dir.path().join("cloud-relay-url.bin"), b"https://relay").unwrap();
+    let mut r = rig(access_seam(Mode::Serve, &files)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    send(&mut c, &req).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
 }

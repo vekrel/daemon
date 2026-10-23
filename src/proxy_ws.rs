@@ -188,9 +188,23 @@ pub async fn handler(
     };
     ws.on_upgrade(move |client| {
         let conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
+        // Node counted this socket as connected (`markConnected` runs before its 101).
+        let sid = match &session {
+            WsSession::Verified(s) => Some(s.sid.as_str()),
+            _ => None,
+        };
+        let entry = rpc.registry().open(sid);
         let (done_tx, done) = mpsc::unbounded_channel();
         let rpc = Conn::new(rpc, session, done_tx, ctx.upstream.shadow.clone());
-        pump(client, up, generation, shutdown, ctx.tap, conn, (rpc, done))
+        pump(
+            client,
+            up,
+            generation,
+            shutdown,
+            ctx.tap,
+            conn,
+            (rpc, done, entry),
+        )
     })
 }
 
@@ -225,8 +239,13 @@ async fn pump<U>(
     mut shutdown: watch::Receiver<bool>,
     tap: Arc<dyn FrameTap>,
     conn: u64,
-    // Routing state, and where its spawned handlers report back.
-    (mut rpc, mut done): (Conn, mpsc::UnboundedReceiver<crate::rpc_seam::Done>),
+    // Routing state, where its spawned handlers report back, and the socket's registry entry
+    // (unregistered when the pump ends; its `close` closes both legs).
+    (mut rpc, mut done, entry): (
+        Conn,
+        mpsc::UnboundedReceiver<crate::rpc_seam::Done>,
+        crate::auth::registry::Entry,
+    ),
 ) where
     U: StreamExt<Item = Result<Message, WsError>> + SinkExt<Message, Error = WsError> + Unpin,
 {
@@ -284,6 +303,11 @@ async fn pump<U>(
             }
             _ = generation.changed() => {
                 let f = AxClose { code: 1012, reason: "engine restarted".into() };
+                let _ = client.send(AxMsg::Close(Some(f))).await;
+                break;
+            }
+            _ = entry.close.cancelled() => {
+                let f = AxClose { code: 1008, reason: "session revoked".into() };
                 let _ = client.send(AxMsg::Close(Some(f))).await;
                 break;
             }

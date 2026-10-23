@@ -685,6 +685,7 @@ async fn valid_ticket_verifies_with_row_session() {
     assert_eq!(
         ws(&e, &q(&ticket())).await,
         WsSession::Verified(VerifiedSession {
+            sid: SID.into(),
             scopes: vec!["orchestration:read".into(), "filesystem:read".into()],
             method: "browser-session-cookie".into(),
             exp: 4_070_908_800_000,
