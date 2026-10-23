@@ -1641,3 +1641,292 @@ fn auth_access_hands_off_to_node_when_a_cloud_link_appears() {
     drop(d);
     assert!(!home.exists());
 }
+
+// ---- pairing links: create, list, revoke ----
+
+/// The engine's own loopback base URL, from the daemon config `start_with` wrote.
+fn engine_base(home: &Path) -> String {
+    let cfg: toml::Value =
+        toml::from_str(&std::fs::read_to_string(home.join("vekrel.toml")).unwrap()).unwrap();
+    format!(
+        "http://127.0.0.1:{}",
+        cfg["engine"]["port"].as_integer().unwrap()
+    )
+}
+
+/// `method path` with the session cookie (and a JSON body) → (status, served by Rust, JSON).
+fn call(
+    base: &str,
+    cookie: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, bool, serde_json::Value) {
+    let cookie = format!("cookie: {cookie}");
+    let url = format!("{base}{path}");
+    let mut args = vec!["-i", "-X", method, "-H", &cookie];
+    if let Some(b) = body {
+        args.extend(["-H", "content-type: application/json", "-d", b]);
+    }
+    args.push(&url);
+    let (code, out) = curl(&args);
+    let (head, body) = out.split_once("\r\n\r\n").unwrap();
+    let rust = head
+        .lines()
+        .any(|l| l.eq_ignore_ascii_case("x-vekrel-served-by: rust"));
+    (code, rust, serde_json::from_str(body).unwrap())
+}
+
+/// Ids, codes, trace ids and times masked.
+fn masked(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| {
+                    let m = match k.as_str() {
+                        "id" | "credential" | "traceId" | "createdAt" | "expiresAt" => {
+                            Value::String(format!("<{k}>"))
+                        }
+                        _ => masked(v),
+                    };
+                    (k.clone(), m)
+                })
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.iter().map(masked).collect()),
+        v => v.clone(),
+    }
+}
+
+/// (name, status, served by Rust, masked body).
+type Step = (&'static str, u16, bool, serde_json::Value);
+
+/// The task's scripted scenario through the daemon. Returns each step's (name, status, masked
+/// body), whether Rust served it, and the ids of the three links it creates. `wait(event, id)`
+/// runs after each write that should reach a `subscribeAuthAccess` stream.
+fn pairing_scenario(
+    base: &str,
+    home: &Path,
+    token: &str,
+    wait: &mut dyn FnMut(&str, &str),
+) -> (Vec<Step>, [String; 3]) {
+    let owner = pair(base, home, token);
+    let mut steps = vec![];
+    let mut step = |name, cookie: &str, method, path, body: Option<&str>| {
+        let (code, rust, v) = call(base, cookie, method, path, body);
+        steps.push((name, code, rust, masked(&v)));
+        v
+    };
+    const CREATE: &str = "/api/auth/pairing-token";
+    const REVOKE: &str = "/api/auth/pairing-links/revoke";
+    const LIST: &str = "/api/auth/pairing-links";
+    let l1 = step(
+        "default",
+        &owner,
+        "POST",
+        CREATE,
+        Some(r#"{"label":" Default "}"#),
+    );
+    let l2 = step(
+        "delegated",
+        &owner,
+        "POST",
+        CREATE,
+        Some(r#"{"label":"Delegated","scopes":["orchestration:read","access:read"]}"#),
+    );
+    let l3 = step(
+        "narrow",
+        &owner,
+        "POST",
+        CREATE,
+        Some(r#"{"scopes":["access:write","orchestration:read"]}"#),
+    );
+    for l in [&l1, &l2, &l3] {
+        wait("pairingLinkUpserted", l["id"].as_str().unwrap());
+    }
+    // The new code pairs a browser through Node's own port.
+    let narrow = pair(&engine_base(home), home, l3["credential"].as_str().unwrap());
+    wait("pairingLinkRemoved", l3["id"].as_str().unwrap());
+    step(
+        "lacks delegated",
+        &narrow,
+        "POST",
+        CREATE,
+        Some(r#"{"scopes":["orchestration:read","filesystem:read"]}"#),
+    );
+    step("lacks default", &narrow, "POST", CREATE, Some("{}"));
+    step("narrow list", &narrow, "GET", LIST, None);
+    step(
+        "duplicate",
+        &owner,
+        "POST",
+        CREATE,
+        Some(r#"{"scopes":["access:read","access:read"]}"#),
+    );
+    step("empty", &owner, "POST", CREATE, Some(r#"{"scopes":[]}"#));
+    step("list", &owner, "GET", LIST, None);
+    let id = |v: &serde_json::Value| serde_json::json!({ "id": v["id"] }).to_string();
+    step("revoke open", &owner, "POST", REVOKE, Some(&id(&l1)));
+    wait("pairingLinkRemoved", l1["id"].as_str().unwrap());
+    step("revoke consumed", &owner, "POST", REVOKE, Some(&id(&l3)));
+    step("revoke again", &owner, "POST", REVOKE, Some(&id(&l1)));
+    step("list after", &owner, "GET", LIST, None);
+    let ids = [&l1, &l2, &l3].map(|v| v["id"].as_str().unwrap().to_owned());
+    (steps, ids)
+}
+
+/// `auth_pairing_links` with ids, codes and times normalised (expiry kept relative), sorted.
+fn links_normalised(home: &Path) -> Vec<String> {
+    let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+    let ms = |v: &serde_json::Value| {
+        let s = v.as_str().unwrap();
+        db.query_row(
+            "SELECT CAST(ROUND((julianday(?1) - 2440587.5) * 86400000) AS INTEGER)",
+            [s],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let mut out: Vec<String> = dump(&db, "auth_pairing_links")
+        .into_iter()
+        .map(|mut r| {
+            let code = r["credential"].as_str().unwrap();
+            if r["subject"] == "one-time-token" {
+                let alphabet = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+                assert!(
+                    code.len() == 12 && code.bytes().all(|b| alphabet.contains(&b)),
+                    "{r}"
+                );
+            }
+            let created = ms(&r["created_at"]);
+            for k in ["consumed_at", "revoked_at"] {
+                r[k] = serde_json::json!(!r[k].is_null());
+            }
+            r["expires_at"] = serde_json::json!(ms(&r["expires_at"]) - created);
+            for k in ["id", "credential", "created_at"] {
+                r[k] = serde_json::json!("<masked>");
+            }
+            r.to_string()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn pairing_links_shadow_matches_and_serve_writes_like_node() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
+    use tokio_tungstenite::tungstenite::Message;
+
+    // Home A: every route shadow (Node writes). Home B: Rust serves the routes and the stream.
+    let Some((da, base_a, home_a, token_a)) = start("links-shadow") else {
+        return;
+    };
+    // The startup token is single-use: a watcher session takes it and mints the owner's link.
+    let watcher_a = pair(&base_a, &home_a, &token_a);
+    let owner_a = post(&base_a, &watcher_a, "/api/auth/pairing-token", "{}");
+    let (steps_a, _) = pairing_scenario(
+        &base_a,
+        &home_a,
+        owner_a["credential"].as_str().unwrap(),
+        &mut |_, _| {},
+    );
+    for route in [
+        "POST /api/auth/pairing-token",
+        "GET /api/auth/pairing-links",
+        "POST /api/auth/pairing-links/revoke",
+    ] {
+        let (m, mm) = shadow_counts(&home_a, route);
+        println!("{route} shadow: {m} match, {mm} mismatch");
+        assert_eq!(mm, 0, "{route}");
+        assert!(m >= 3, "{route} compared");
+    }
+    let rows_a = links_normalised(&home_a);
+
+    let Some((db, base_b, home_b, token_b)) = start_with("links-serve", |home, _| {
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap()
+            + "\"POST /api/auth/pairing-token\" = \"serve\"\n\
+               \"GET /api/auth/pairing-links\" = \"serve\"\n\
+               \"POST /api/auth/pairing-links/revoke\" = \"serve\"\n\
+               \"subscribeAuthAccess\" = \"serve\"\n";
+        std::fs::write(&cfg, t).unwrap();
+    }) else {
+        return;
+    };
+    // A Rust-served stream opened by a separate admin session before Rust's writes.
+    let watcher = pair(&base_b, &home_b, &token_b);
+    let port = base_b.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut ws = rt.block_on(auth_ws(&port, &watcher));
+    rt.block_on(subscribe_first_chunk(&mut ws, 1));
+    let owner_link = post(&base_b, &watcher, "/api/auth/pairing-token", "{}");
+    // Reads the stream (acking each Chunk) until `(event, id)` arrives.
+    let mut events: Vec<(String, Option<String>)> = vec![];
+    let mut wait = |want: &str, want_id: &str| {
+        rt.block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !events
+                .iter()
+                .any(|e| e.0 == want && e.1.as_deref() == Some(want_id))
+            {
+                let m = tokio::time::timeout_at(deadline, ws.next()).await;
+                let Ok(Some(Ok(Message::Text(t)))) = m else {
+                    panic!("no {want} {want_id} on the stream: {m:?} after {events:?}")
+                };
+                let f: Value = serde_json::from_str(t.as_str()).unwrap();
+                if f["requestId"] != 1 {
+                    continue;
+                }
+                assert_eq!(f["_tag"], "Chunk", "{f}");
+                for e in f["values"].as_array().unwrap() {
+                    let id = e["payload"]["id"].as_str().map(str::to_owned);
+                    events.push((e["type"].as_str().unwrap().to_owned(), id));
+                }
+                ws.send(Message::text(r#"{"_tag":"Ack","requestId":1}"#))
+                    .await
+                    .unwrap();
+            }
+        })
+    };
+    let (steps_b, ids) = pairing_scenario(
+        &base_b,
+        &home_b,
+        owner_link["credential"].as_str().unwrap(),
+        &mut wait,
+    );
+    println!("stream events: {events:?}");
+    let has = |t: &str, id: &str| {
+        events
+            .iter()
+            .any(|e| e.0 == t && e.1.as_deref() == Some(id))
+    };
+    for id in &ids {
+        assert!(has("pairingLinkUpserted", id), "upsert {id}");
+    }
+    assert!(has("pairingLinkRemoved", &ids[0]), "revoked link removed");
+    assert!(has("pairingLinkRemoved", &ids[2]), "consumed link removed");
+    assert!(!has("pairingLinkRemoved", &ids[1]));
+    drop(ws);
+
+    // Same answers; A from Node, B from Rust (except nothing declined).
+    assert_eq!(steps_a.len(), steps_b.len());
+    for (a, b) in steps_a.iter().zip(&steps_b) {
+        println!("{}: {} {}", a.0, a.1, a.3);
+        assert_eq!((a.0, a.1, &a.3), (b.0, b.1, &b.3), "step {}", a.0);
+        assert!(!a.2, "A is Node's: {}", a.0);
+        assert!(b.2, "B is Rust's: {}", b.0);
+    }
+    let rows_b = links_normalised(&home_b);
+    println!(
+        "A rows:\n{}\nB rows:\n{}",
+        rows_a.join("\n"),
+        rows_b.join("\n")
+    );
+    assert_eq!(rows_a, rows_b, "auth_pairing_links differ");
+    drop((da, db));
+    assert!(!home_a.exists() && !home_b.exists());
+}

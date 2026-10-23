@@ -4,7 +4,8 @@ use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
     handlers::{
-        HandlerCtx, auth_access, auth_session, browse, machine_descriptor, read_file, ws_ticket,
+        HandlerCtx, auth_access, auth_session, browse, machine_descriptor, pairing_links,
+        read_file, ws_ticket,
     },
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
@@ -91,8 +92,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The supervisor pins the engine to VEKREL_HOST=127.0.0.1, so no machine id is needed.
                 let desc = auth_session::Descriptor::web("127.0.0.1", engine_port, dir, "");
                 let auth = Arc::new(auth_session::AuthSession::new(desc, files.clone()));
-                let routes: [Arc<dyn RouteHandler>; 2] =
-                    [auth.clone(), Arc::new(ws_ticket::WsTicket(auth.clone()))];
+                let routes: [Arc<dyn RouteHandler>; 5] = [
+                    auth.clone(),
+                    Arc::new(ws_ticket::WsTicket(auth.clone())),
+                    Arc::new(pairing_links::CreatePairingToken(auth.clone())),
+                    Arc::new(pairing_links::ListPairingLinks(auth.clone())),
+                    Arc::new(pairing_links::RevokePairingLink(auth.clone())),
+                ];
                 for h in routes {
                     let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
                     seam = seam.with(mode, h);

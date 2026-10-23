@@ -9,6 +9,7 @@ base64 = "0.23.1"
 brotli-decompressor = "6.1.1"
 clap = { version = "4.6.7", features = ["derive"] }
 flate2 = "1.1.10"
+getrandom = "0.3.4"
 futures-util = "0.3.34"
 hmac = "0.13.0"
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-legacy", "http1", "tokio"] }

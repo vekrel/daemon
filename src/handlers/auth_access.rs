@@ -24,7 +24,7 @@ use std::{
 };
 
 /// `AuthMachineScope` (contracts `auth.ts`): rows with any other scope fail Node's decode.
-const SCOPES: [&str; 17] = [
+pub(crate) const SCOPES: [&str; 17] = [
     "orchestration:read",
     "orchestration:operate",
     "settings:write",
@@ -265,7 +265,7 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn open_db(path: &PathBuf) -> Result<Connection, String> {
+pub(crate) fn open_db(path: &PathBuf) -> Result<Connection, String> {
     let c = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -329,44 +329,8 @@ pub(crate) fn read(
     now: i64,
 ) -> Result<Lists, String> {
     let now = super::auth_session::iso_millis(now);
+    let links = read_links(c, &now)?;
     let e = |e: rusqlite::Error| e.to_string();
-    let mut links = Vec::new();
-    let mut q = c
-        .prepare_cached(
-            "SELECT id, credential, method, scopes, subject, label, created_at, expires_at
-             FROM auth_pairing_links
-             WHERE revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ?1
-             ORDER BY created_at DESC, id DESC",
-        )
-        .map_err(e)?;
-    let mut rows = q.query([&now]).map_err(e)?;
-    while let Some(r) = rows.next().map_err(e)? {
-        let g = |i| r.get::<_, String>(i).map_err(e);
-        let _credential = g(1)?;
-        if !matches!(g(2)?.as_str(), "desktop-bootstrap" | "one-time-token") {
-            return Err("method".into());
-        }
-        let subject = g(4)?;
-        // `INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT` (compared before encoding).
-        if subject == "administrative-bootstrap" {
-            continue;
-        }
-        let id = trimmed(&g(0)?)?;
-        let mut o = Map::new();
-        o.insert("id".into(), json!(id));
-        scopes(&g(3)?, &mut o)?;
-        o.insert("subject".into(), json!(trimmed(&subject)?));
-        let label: Option<String> = r.get(5).map_err(e)?;
-        if let Some(l) = label.filter(|l| !l.is_empty()) {
-            o.insert("label".into(), json!(trimmed(&l)?));
-        }
-        let (created, c_iso) = time(&g(6)?)?;
-        o.insert("createdAt".into(), json!(c_iso));
-        o.insert("expiresAt".into(), json!(time(&g(7)?)?.1));
-        links.push((created, id, Value::Object(o)));
-    }
-    // `toSorted` by createdAt descending (stable over the SQL order).
-    links.sort_by_key(|l| std::cmp::Reverse(l.0));
 
     let mut clients = Vec::new();
     let mut q = c
@@ -438,9 +402,53 @@ pub(crate) fn read(
         mb.cmp(&ma).then(cb.cmp(&ca)).then(ib.cmp(&ia))
     });
     Ok(Lists {
-        links: links.into_iter().map(|l| (l.1, l.2)).collect(),
+        links,
         clients: clients.into_iter().map(|c| (c.1, c.2)).collect(),
     })
+}
+
+/// `MachineAuth.listPairingLinks()` at `now` (ISO text), encoded in contracts schema order.
+pub(crate) fn read_links(c: &Connection, now: &str) -> Result<Vec<(String, Value)>, String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let mut links = Vec::new();
+
+    let mut q = c
+        .prepare_cached(
+            "SELECT id, credential, method, scopes, subject, label, created_at, expires_at
+             FROM auth_pairing_links
+             WHERE revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ?1
+             ORDER BY created_at DESC, id DESC",
+        )
+        .map_err(e)?;
+    let mut rows = q.query([now]).map_err(e)?;
+    while let Some(r) = rows.next().map_err(e)? {
+        let g = |i| r.get::<_, String>(i).map_err(e);
+        let _credential = g(1)?;
+        if !matches!(g(2)?.as_str(), "desktop-bootstrap" | "one-time-token") {
+            return Err("method".into());
+        }
+        let subject = g(4)?;
+        // `INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT` (compared before encoding).
+        if subject == "administrative-bootstrap" {
+            continue;
+        }
+        let id = trimmed(&g(0)?)?;
+        let mut o = Map::new();
+        o.insert("id".into(), json!(id));
+        scopes(&g(3)?, &mut o)?;
+        o.insert("subject".into(), json!(trimmed(&subject)?));
+        let label: Option<String> = r.get(5).map_err(e)?;
+        if let Some(l) = label.filter(|l| !l.is_empty()) {
+            o.insert("label".into(), json!(trimmed(&l)?));
+        }
+        let (created, c_iso) = time(&g(6)?)?;
+        o.insert("createdAt".into(), json!(c_iso));
+        o.insert("expiresAt".into(), json!(time(&g(7)?)?.1));
+        links.push((created, id, Value::Object(o)));
+    }
+    // `toSorted` by createdAt descending (stable over the SQL order).
+    links.sort_by_key(|l| std::cmp::Reverse(l.0));
+    Ok(links.into_iter().map(|l| (l.1, l.2)).collect())
 }
 
 /// The stream's first item.
