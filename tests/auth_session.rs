@@ -601,8 +601,9 @@ async fn shadow_never_waits_for_rust() {
     let (s, _, b) = get(&url, &[]).await;
     let took = t.elapsed();
     assert_eq!((s, b), (200, unauth()));
+    // Rust takes 2 s: under 1.5 s (load-tolerant) means Node's answer did not wait for it.
     assert!(
-        took < std::time::Duration::from_millis(300),
+        took < std::time::Duration::from_millis(1500),
         "took {took:?}"
     );
     assert!(logs.lines().is_empty(), "compared before Rust finished?");

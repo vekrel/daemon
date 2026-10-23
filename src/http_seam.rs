@@ -339,8 +339,8 @@ pub fn diff_body(cmp: &Compare, body: &[u8], rust: &[u8]) -> Option<(&'static st
     if !canonical(&a, body) || !canonical(&b, rust) {
         return Some(("body", "$ (formatting)".into()));
     }
-    if let Some(k) = cmp.skew.iter().find(|k| a.get(**k) != b.get(**k)) {
-        return Some((SEQUENCE_SKEW, format!("$.{k}")));
+    if cmp.skew.iter().any(|k| a.get(*k) != b.get(*k)) {
+        return Some((SEQUENCE_SKEW, skew_path(cmp, &a, b)));
     }
     let raw = (!cmp.enrich.is_empty()).then(|| (a.clone(), b.clone()));
     let mut warm = false;
@@ -360,6 +360,22 @@ pub fn diff_body(cmp: &Compare, body: &[u8], rust: &[u8]) -> Option<(&'static st
         first_diff(&a, &b, "$".into()).unwrap_or_else(|| "$ (formatting)".into())
     };
     Some(("body", path))
+}
+
+/// The first real difference under a skew: Rust's `skew` keys set to Node's, then compared
+/// without `skew`; `""` when the sequences were the only difference.
+pub fn skew_path(cmp: &Compare, node: &Value, mut rust: Value) -> String {
+    for k in cmp.skew {
+        if let (Some(v), Some(r)) = (node.get(*k), rust.get_mut(*k)) {
+            *r = v.clone();
+        }
+    }
+    let plain = Compare { skew: &[], ..*cmp };
+    let (n, r) = (serde_json::to_vec(node), serde_json::to_vec(&rust));
+    let (Ok(n), Ok(r)) = (n, r) else {
+        return "$ (not json)".into();
+    };
+    diff_body(&plain, &n, &r).map_or_else(String::new, |(_, path)| path)
 }
 
 /// Nulls the ignored values on both sides and copies Rust's timestamp onto Node's when they are
@@ -520,6 +536,8 @@ pub(crate) fn tee(
     htu: bool,
     // Held until the compare is done: it bounds the bodies and JSON trees shadows keep in memory.
     permit: OwnedSemaphorePermit,
+    // Rust's read once more, for a `sequence_skew` (`Compare::skew`); `None` keeps the skew.
+    rerun: Option<BoxFuture<'static, Option<Response<Bytes>>>>,
 ) -> Response<Body> {
     let (parts, body) = node.into_parts();
     // shortcut: a body without a known length (chunked) is skipped too; Node sends lengths for JSON.
@@ -551,9 +569,19 @@ pub(crate) fn tee(
         // A multi-MB body (the shell) takes tens of ms to compare: off the async workers.
         let (h, b) = (headers.clone(), bytes.clone());
         let blocking = move || (diff(&cmp, status, &h, &b, &rust), rust);
-        let Ok((d, rust)) = tokio::task::spawn_blocking(blocking).await else {
+        let Ok((mut d, rust)) = tokio::task::spawn_blocking(blocking).await else {
             return;
         };
+        // A write landed between the two reads: Rust reads again now that Node's answer is in.
+        if let (Some((SEQUENCE_SKEW, _)), Some(rerun)) = (&d, rerun)
+            && let Some(again) = rerun.await
+        {
+            let (h, b) = (headers.clone(), bytes.clone());
+            let blocking = move || diff(&cmp, status, &h, &b, &again);
+            if let Ok(again) = tokio::task::spawn_blocking(blocking).await {
+                d = again;
+            }
+        }
         if let Some(DryRun(check)) = rust.extensions().get::<DryRun>().cloned()
             && status == rust.status()
         {
@@ -568,6 +596,10 @@ pub(crate) fn tee(
         }
         match d {
             None => tracing::info!(route, outcome = "match", "rust shadow"),
+            Some((SEQUENCE_SKEW, path)) if path.is_empty() => {
+                tracing::info!(route, outcome = SEQUENCE_SKEW, "rust shadow")
+            }
+            // Still skewed after the rerun: the first difference beyond the sequence is evidence.
             Some((SEQUENCE_SKEW, path)) => {
                 tracing::info!(route, outcome = SEQUENCE_SKEW, path, "rust shadow")
             }
@@ -1023,7 +1055,17 @@ mod tests {
                 r#"{"snapshotSequence":4,"t":[2]}"#
             )
             .as_deref(),
-            Some("sequence_skew $.snapshotSequence")
+            Some("sequence_skew $.t[0]"),
+            "the first difference beyond the sequence"
+        );
+        assert_eq!(
+            d(
+                r#"{"snapshotSequence":3,"t":[1]}"#,
+                r#"{"snapshotSequence":4,"t":[1]}"#
+            )
+            .as_deref(),
+            Some("sequence_skew "),
+            "only the sequence differs: no path"
         );
         // Same sequence: every other difference is a mismatch.
         assert_eq!(
@@ -1175,7 +1217,7 @@ mod tests {
             let (tx, node) = held_node(3);
             held.push((
                 tx,
-                tee(node, job, "r".into(), Compare::DEFAULT, false, permit),
+                tee(node, job, "r".into(), Compare::DEFAULT, false, permit, None),
             ));
         }
         assert_eq!((held.len(), skipped), (2, 3));
@@ -1200,7 +1242,15 @@ mod tests {
         let permit = l.acquire("slow").unwrap();
         let job = l.run("slow", std::future::pending::<Option<Response<Bytes>>>());
         let (tx, node) = held_node(3);
-        let r = tee(node, job, "slow".into(), Compare::DEFAULT, false, permit);
+        let r = tee(
+            node,
+            job,
+            "slow".into(),
+            Compare::DEFAULT,
+            false,
+            permit,
+            None,
+        );
         tx.send(Bytes::from_static(b"[2]")).await.unwrap();
         drop(tx);
         let body = tokio::time::timeout(Duration::from_secs(1), all(r.into_body()))
@@ -1221,11 +1271,99 @@ mod tests {
             tee_limit: 10,
             ..Compare::DEFAULT
         };
-        let r = tee(node, job, "big".into(), small, false, permit);
+        let r = tee(node, job, "big".into(), small, false, permit, None);
         assert_eq!(l.permits.available_permits(), 1);
         tx.send(Bytes::from_static(b"[333333333]")).await.unwrap();
         drop(tx);
         assert_eq!(all(r.into_body()).await.unwrap().len(), 11);
+    }
+
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Logs {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skew_reruns_rust_and_keeps_the_path_beyond_the_sequence() {
+        let logs = Logs::default();
+        let l = logs.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || l.clone())
+            .finish();
+        let _g = tracing::subscriber::set_default(sub);
+        let lim = ShadowLimit::default();
+        let ct = ("content-type", "application/json");
+        const S: Compare = Compare {
+            skew: &["snapshotSequence"],
+            ..Compare::DEFAULT
+        };
+        let node = r#"{"snapshotSequence":4,"t":[1]}"#;
+        let cases = [
+            // Rust read before Node's write; its rerun sees Node's sequence: compared, a match.
+            ("a", r#"{"snapshotSequence":4,"t":[1]}"#, true),
+            // No rerun: only the sequence differs, so no path.
+            ("b", r#"{"snapshotSequence":4,"t":[1]}"#, false),
+            // Still skewed after the rerun: the first real difference is logged.
+            ("c", r#"{"snapshotSequence":5,"t":[2]}"#, true),
+        ];
+        for (route, again, rerun) in cases {
+            let permit = lim.acquire(route).unwrap();
+            let job = lim.run(route, async move {
+                Some(rust(200, &[ct], r#"{"snapshotSequence":3,"t":[1]}"#))
+            });
+            let rerun = rerun.then(|| {
+                let r: BoxFuture<'static, _> =
+                    Box::pin(async move { Some(rust(200, &[ct], again)) });
+                r
+            });
+            let (tx, resp) = held_node(node.len());
+            let r = tee(resp, job, route.into(), S, false, permit, rerun);
+            tx.send(Bytes::from_static(node.as_bytes())).await.unwrap();
+            drop(tx);
+            axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let lines = loop {
+            let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+            let lines: Vec<String> = text
+                .lines()
+                .filter(|l| l.contains("rust shadow"))
+                .map(String::from)
+                .collect();
+            if lines.len() >= 3 || tokio::time::Instant::now() > deadline {
+                break lines;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let line = |r: &str| {
+            let tag = format!("route=\"{r}\"");
+            lines
+                .iter()
+                .find(|l| l.contains(&tag))
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert!(line("a").contains("outcome=\"match\""), "{lines:?}");
+        let b = line("b");
+        assert!(
+            b.contains("sequence_skew") && !b.contains("path"),
+            "{lines:?}"
+        );
+        let c = line("c");
+        assert!(
+            c.contains("sequence_skew") && c.contains("path=\"$.t[0]\""),
+            "{lines:?}"
+        );
     }
 
     #[tokio::test]

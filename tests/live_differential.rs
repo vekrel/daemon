@@ -4176,7 +4176,7 @@ fn shell_builder_matches_node_on_owner_db() {
     };
     let cookie = pair(&base, &home, &token);
     let golden = tempfile::Builder::new()
-        .prefix("vekrel-shell-golden-")
+        .prefix(&support::real_db::pid_prefix("vekrel-shell-golden-"))
         .tempdir()
         .unwrap();
     for (label, location) in [("active", Location::Active), ("archive", Location::Archive)] {

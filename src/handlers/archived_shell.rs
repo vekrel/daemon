@@ -101,7 +101,8 @@ pub fn snapshot(db: &StateDb, payload: &Value) -> Result<Value, &'static str> {
 }
 
 /// Two successful Exits at different `snapshotSequence`s are `sequence_skew` (a write landed
-/// between Node's read and Rust's), not a mismatch; anything else is compared with `COMPARE`.
+/// between Node's read and Rust's), not a mismatch, with the first difference beyond the sequence
+/// as its path (`""` if none); anything else is compared with `COMPARE`.
 fn shadow_diff(node: &str, rust: &str) -> (&'static str, &'static str, String) {
     let seq = |t: &str| {
         let v: Value = serde_json::from_str(t).ok()?;
@@ -110,7 +111,14 @@ fn shadow_diff(node: &str, rust: &str) -> (&'static str, &'static str, String) {
     if let (Some(a), Some(b)) = (seq(node), seq(rust))
         && a != b
     {
-        let path = "$.value.snapshotSequence".to_owned();
+        let mut v: Value = serde_json::from_str(rust).expect("parsed by seq");
+        v["value"]["snapshotSequence"] = a.into();
+        let same = v.to_string();
+        let path = if same == node {
+            String::new()
+        } else {
+            shadow_diff(node, &same).2
+        };
         return ("sequence_skew", "snapshotSequence", path);
     }
     match diff_body(&COMPARE, node.as_bytes(), rust.as_bytes()) {
@@ -282,13 +290,18 @@ mod tests {
             .to_string()
         };
         let rust = exit(5, Value::Null, "P");
+        // A skew keeps the first difference beyond the sequence; none: no path.
         assert_eq!(
             shadow_diff(&exit(6, Value::Null, "Q"), &rust),
             (
                 "sequence_skew",
                 "snapshotSequence",
-                "$.value.snapshotSequence".into()
+                "$.value.projects[0].title".into()
             )
+        );
+        assert_eq!(
+            shadow_diff(&exit(6, Value::Null, "P"), &rust),
+            ("sequence_skew", "snapshotSequence", String::new())
         );
         assert_eq!(
             shadow_diff(&exit(5, json!({"name": "r"}), "P"), &rust),

@@ -297,6 +297,8 @@ struct Shadowed {
     node: Option<String>,
     cancel: CancellationToken,
     since: Instant,
+    /// A unary handler's read once more, for a `sequence_skew` (`UnaryHandler::shadow_diff`).
+    rerun: Option<BoxFuture<'static, Option<Value>>>,
 }
 
 /// Shadow entries whose Exit never arrives from Node are dropped after this.
@@ -586,12 +588,24 @@ impl Conn {
                     node: None,
                     cancel: cancel.clone(),
                     since: Instant::now(),
+                    rerun: None,
                 };
                 match session {
                     None => entry.rust = Some(denied().to_string()),
                     Some(s) => {
                         let run = match h {
-                            Handler::Unary(h) => self.run(h, payload, s, cancel, "shadow").boxed(),
+                            Handler::Unary(h) => {
+                                // Lazy: runs only if the compare finds a skew.
+                                let again = self.run(
+                                    h.clone(),
+                                    payload.clone(),
+                                    s.clone(),
+                                    cancel.clone(),
+                                    "shadow",
+                                );
+                                entry.rerun = Some(again.boxed());
+                                self.run(h, payload, s, cancel, "shadow").boxed()
+                            }
                             Handler::Stream(h) => {
                                 first_chunk(h, payload, self.ctx(s, cancel)).boxed()
                             }
@@ -729,32 +743,72 @@ impl Conn {
     /// JSON path, never values.
     fn settle(&mut self, key: String) {
         let Some(Shadowed {
-            rust: Some(rust),
-            node: Some(node),
-            tag,
+            rust: Some(_),
+            node: Some(_),
             ..
         }) = self.shadow.get(&key)
         else {
             return;
         };
-        if node == rust {
-            tracing::info!(tag, outcome = "match", "rust shadow");
-        } else {
-            let diff = match self.seam.find(tag) {
-                Some((Handler::Unary(h), _)) => h.shadow_diff(node, rust),
-                _ => (
-                    "mismatch",
-                    "exit",
-                    json_path(node.as_bytes(), rust.as_bytes()),
-                ),
-            };
-            let (outcome, field, path) = diff;
-            match outcome {
-                "mismatch" => tracing::warn!(tag, outcome, field, path, "rust shadow"),
-                _ => tracing::info!(tag, outcome, field, path, "rust shadow"),
-            }
+        let s = self.shadow.remove(&key).expect("checked above");
+        let (tag, node, rust) = (s.tag, s.node.expect("some"), s.rust.expect("some"));
+        let unary = match self.seam.find(tag) {
+            Some((Handler::Unary(h), _)) => Some(h.clone()),
+            _ => None,
+        };
+        let diff = shadow_outcome(unary.as_deref(), &node, &rust);
+        // A write landed between the two reads: Rust reads again now that Node's Exit is in.
+        if let (Some(("sequence_skew", ..)), Some(h), Some(rerun)) = (&diff, unary, s.rerun)
+            && let Some(task) = self.limit.spawn(tag, rerun)
+        {
+            let cancel = s.cancel;
+            tokio::spawn(async move {
+                let again = task.await.ok().flatten().map(|e| e.to_string());
+                let diff = match again {
+                    // Cancelled: its Exit is `interrupted`, not a read.
+                    Some(again) if !cancel.is_cancelled() => {
+                        shadow_outcome(Some(&*h), &node, &again)
+                    }
+                    _ => diff,
+                };
+                log_shadow(tag, diff);
+            });
+            return;
         }
-        self.shadow.remove(&key);
+        log_shadow(tag, diff);
+    }
+}
+
+/// `None` for a match, else `(outcome, field, path)`.
+fn shadow_outcome(
+    h: Option<&dyn UnaryHandler>,
+    node: &str,
+    rust: &str,
+) -> Option<(&'static str, &'static str, String)> {
+    if node == rust {
+        return None;
+    }
+    Some(match h {
+        Some(h) => h.shadow_diff(node, rust),
+        None => (
+            "mismatch",
+            "exit",
+            json_path(node.as_bytes(), rust.as_bytes()),
+        ),
+    })
+}
+
+fn log_shadow(tag: &'static str, diff: Option<(&'static str, &'static str, String)>) {
+    match diff {
+        None => tracing::info!(tag, outcome = "match", "rust shadow"),
+        Some((outcome @ "mismatch", field, path)) => {
+            tracing::warn!(tag, outcome, field, path, "rust shadow")
+        }
+        // A skew where only the sequence differs: no path.
+        Some((outcome, field, path)) if path.is_empty() => {
+            tracing::info!(tag, outcome, field, "rust shadow")
+        }
+        Some((outcome, field, path)) => tracing::info!(tag, outcome, field, path, "rust shadow"),
     }
 }
 

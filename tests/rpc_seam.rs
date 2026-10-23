@@ -18,7 +18,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::Duration,
 };
@@ -793,6 +793,76 @@ async fn shadow_compares_node_exit_bytes_exactly() {
         lines[0].contains("mismatch") && lines[0].contains("$ (formatting)"),
         "{lines:?}"
     );
+}
+
+/// `test.seq`: `{"snapshotSequence": n, "t": payload.t}`, `n` counting its calls from 1; a
+/// differing sequence is `sequence_skew`, with path `$.value.t` if `t` differs too.
+#[derive(Default)]
+struct Seq(AtomicI64);
+
+impl UnaryHandler for Seq {
+    fn tag(&self) -> &'static str {
+        "test.seq"
+    }
+    fn required_scope(&self) -> &'static str {
+        "filesystem:read"
+    }
+    fn handle<'a>(
+        &'a self,
+        payload: Value,
+        _: &'a HandlerCtx,
+    ) -> BoxFuture<'a, Option<Result<Value, Value>>> {
+        let n = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+        async move { Some(Ok(json!({"snapshotSequence": n, "t": payload["t"]}))) }.boxed()
+    }
+    fn shadow_diff(&self, node: &str, rust: &str) -> (&'static str, &'static str, String) {
+        let v = |t: &str| serde_json::from_str::<Value>(t).unwrap()["value"].clone();
+        let (a, b) = (v(node), v(rust));
+        if a["snapshotSequence"] == b["snapshotSequence"] {
+            return ("mismatch", "exit", "$".into());
+        }
+        let path = if a["t"] == b["t"] { "" } else { "$.value.t" };
+        ("sequence_skew", "snapshotSequence", path.into())
+    }
+}
+
+#[tokio::test]
+async fn a_shadow_skew_reruns_rust_once_node_has_answered() {
+    let (logs, _g) = Logs::capture();
+    let e = env("skew", "[]");
+    let h: Arc<dyn UnaryHandler> = Arc::new(Seq::default());
+    let s = Seam::new(vec![(h, Mode::Shadow)]).with_auth(auth(&e));
+    let mut r = rig(s).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    // Rust reads 1, Node 2: the rerun reads 2, so the two are compared (a match).
+    let node = json!({"snapshotSequence": 2, "t": 1});
+    send(
+        &mut c,
+        &request(1, "test.seq", json!({"t": 1, "node": node})),
+    )
+    .await;
+    let _ = next_ev(&mut r).await;
+    let _ = recv(&mut c).await;
+    // Still skewed after the rerun (3, then 4, vs 9): the difference beyond the sequence shows.
+    let node = json!({"snapshotSequence": 9, "t": 1});
+    send(
+        &mut c,
+        &request(2, "test.seq", json!({"t": 2, "node": node})),
+    )
+    .await;
+    let _ = next_ev(&mut r).await;
+    let _ = recv(&mut c).await;
+    barrier(&mut r, &mut c, 3).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while logs.lines("rust shadow").len() < 2 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let lines = logs.lines("rust shadow");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(logs.lines("outcome=\"match\"").len(), 1, "{lines:?}");
+    let skew = logs.lines("sequence_skew");
+    assert_eq!(skew.len(), 1, "{lines:?}");
+    assert!(skew[0].contains("path=\"$.value.t\""), "{lines:?}");
 }
 
 #[tokio::test]

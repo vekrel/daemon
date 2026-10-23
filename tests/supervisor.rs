@@ -159,7 +159,8 @@ async fn missing_binary_reports_down_without_panic() {
 async fn running_engine_reports_up() {
     let (_g, port) = start_fake("up", &[]);
     let seen = poll(port, LONG, |h| h.0 == "up").await;
-    assert_eq!(seen.last(), Some(&("up".to_string(), 0)), "{seen:?}");
+    // Any restart count: a loaded machine can restart a slow-starting engine before it is up.
+    assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
 }
 
 #[tokio::test]

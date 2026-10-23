@@ -53,8 +53,9 @@ pub struct StateDb {
     path: PathBuf,
     gate: Mutex<Option<(GateKey, bool)>>,
     /// One idle connection kept between reads: opening one costs 40-60 ms under load (6B Task 7).
-    /// A concurrent read opens its own; a connection whose read failed is dropped.
-    idle: Mutex<Option<Connection>>,
+    /// A concurrent read opens its own; a connection whose read failed is dropped, and so is one
+    /// whose file is no longer at `path` (`file_id`).
+    idle: Mutex<Option<(Connection, Option<FileId>)>>,
 }
 
 impl StateDb {
@@ -73,13 +74,18 @@ impl StateDb {
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, Decline> {
         let idle = self.idle.lock().expect("idle lock").take();
-        let mut c = match idle {
-            Some(c) => c,
-            None => open(&self.path)?,
+        let (mut c, id) = match idle {
+            // Replaced (user data reset, update rollback clone) or gone: the old one reads a deleted file.
+            Some((c, id)) if id.is_some() && file_id(&self.path) == id => (c, id),
+            _ => {
+                // Before the open: a swap in between then costs one reopen, never a stale reuse.
+                let id = file_id(&self.path);
+                (open(&self.path)?, id)
+            }
         };
         let out = Self::read_on(&self.gate, &mut c, f);
         if out.is_ok() {
-            *self.idle.lock().expect("idle lock") = Some(c);
+            *self.idle.lock().expect("idle lock") = Some((c, id));
         }
         out
     }
@@ -118,6 +124,24 @@ impl StateDb {
         }
         Ok(f(&tx)?)
         // `tx` drops here: a rollback, which for a read transaction only ends the snapshot.
+    }
+}
+
+type FileId = (u64, u64);
+
+/// The file at `path` (`None` if missing): `(dev, inode)`.
+fn file_id(path: &Path) -> Option<FileId> {
+    let m = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((m.dev(), m.ino()))
+    }
+    // shortcut: no inode in std on Windows, creation time stands in; upgrade if the daemon ships there.
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::fs::MetadataExt;
+        Some((m.creation_time(), 0))
     }
 }
 
@@ -198,6 +222,26 @@ pub(crate) mod tests {
         assert_eq!(db.read(|c| c.execute("SELECT nope", [])), Err(Decline::Sql));
         let size = db.read(|c| c.query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0)));
         assert_ne!(size, Ok(-1234));
+    }
+
+    #[test]
+    fn a_replaced_db_file_is_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = fixture(dir.path(), "");
+        assert_eq!(count(&db), Ok(0)); // cached idle connection on the original file
+        // Like a user-data reset or the update rollback: a new file renamed over the old one.
+        let new = tempfile::tempdir_in(dir.path()).unwrap();
+        fixture(
+            new.path(),
+            "INSERT INTO projection_projects (project_id, title, workspace_root, auto_pull, \
+             scripts_json, created_at, updated_at) VALUES ('p', 'P', '/w', 0, '[]', 'c', 'u');",
+        );
+        let path = dir.path().join("statev2.sqlite");
+        std::fs::rename(new.path().join("statev2.sqlite"), &path).unwrap();
+        assert_eq!(count(&db), Ok(1));
+        // Gone: the cached connection is dropped, the read declines.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(count(&db), Err(Decline::Sql));
     }
 
     #[test]

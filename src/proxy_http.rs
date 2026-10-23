@@ -208,6 +208,13 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         http_seam::key(&*h),
         h.compare(),
     );
+    // A `sequence_skew` re-runs Rust's read once Node's answer is in (see `http_seam::tee`).
+    let rerun = (!cmp.skew.is_empty()).then(|| {
+        let (h, seam, p) = (h.clone(), upstream.seam.clone(), parts.clone());
+        let (shadow, route) = (upstream.shadow.clone(), route.clone());
+        let read = async move { h.handle(&p, &seam.ctx).await };
+        Box::pin(async move { shadow.run(&route, read).await.ok().flatten() }) as _
+    });
     let dry_run = h.dry_run();
     let permit = upstream.shadow.acquire(&route);
     let mut rust = permit.as_ref().map(|_| {
@@ -229,7 +236,7 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     }
     let node = forward(&upstream, Request::from_parts(parts, body)).await;
     match (rust, permit) {
-        (Some(rust), Some(permit)) => http_seam::tee(node, rust, route, cmp, htu, permit),
+        (Some(rust), Some(permit)) => http_seam::tee(node, rust, route, cmp, htu, permit, rerun),
         _ => node,
     }
 }
