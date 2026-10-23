@@ -189,14 +189,14 @@ async fn query_string_and_cookie_header_reach_upstream() {
     let _c = connect(
         r.proxy,
         "?orchestrationProtocol=2&wsTicket=abc",
-        Some("t3_session_1=zzz"),
+        Some("vekrel_session_1=zzz"),
     )
     .await;
     assert_eq!(
         event(&mut r.ev).await,
         "query:orchestrationProtocol=2&wsTicket=abc"
     );
-    assert_eq!(event(&mut r.ev).await, "cookie:t3_session_1=zzz");
+    assert_eq!(event(&mut r.ev).await, "cookie:vekrel_session_1=zzz");
 }
 
 #[tokio::test]

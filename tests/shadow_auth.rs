@@ -155,7 +155,7 @@ async fn run(name: &str, cookie: Option<String>) -> (u16, String, Option<String>
 
 #[tokio::test]
 async fn valid_token_passes_silently() {
-    let c = format!("other=1; t3_session_3789={}", mint(i64::MAX));
+    let c = format!("other=1; vekrel_session_3789={}", mint(i64::MAX));
     let (status, body, _, warns) = run("valid", Some(c)).await;
     assert_eq!((status, body.as_str()), (203, "up"));
     assert!(warns.is_empty(), "{warns:?}");
@@ -172,7 +172,7 @@ async fn tampered_token_warns_bad_signature() {
     };
     let (status, body, _, warns) = run(
         "tampered",
-        Some(format!("t3_session_3789_abcdef012345={tampered}")),
+        Some(format!("vekrel_session_3789_abcdef012345={tampered}")),
     )
     .await;
     assert_eq!((status, body.as_str()), (203, "up"));
@@ -190,7 +190,8 @@ async fn no_credential_is_silent() {
 
 #[tokio::test]
 async fn expired_token_warns_expired() {
-    let (status, _, _, warns) = run("expired", Some(format!("t3_session_3789={}", mint(1)))).await;
+    let (status, _, _, warns) =
+        run("expired", Some(format!("vekrel_session_3789={}", mint(1)))).await;
     assert_eq!(status, 203);
     assert_eq!(warns.len(), 1, "{warns:?}");
     assert!(warns[0].contains("Expired"));

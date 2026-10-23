@@ -93,7 +93,7 @@ pub fn apply_shared(router: Router, s: Arc<AuthFiles>) -> Router {
     }))
 }
 
-/// Session cookies (`t3_session`, `t3_session_<port>[_<hash12>]`, `t3_session_<hash12>`, see the
+/// Session cookies (`vekrel_session`, `vekrel_session_<port>[_<hash12>]`, `vekrel_session_<hash12>`, see the
 /// engine's `auth/utils.ts`) and `Authorization: Bearer|DPoP` tokens.
 fn credentials(h: &HeaderMap) -> Vec<String> {
     let cookies = h
@@ -102,7 +102,7 @@ fn credentials(h: &HeaderMap) -> Vec<String> {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|c| c.trim().split_once('='))
-        .filter(|(n, _)| *n == "t3_session" || n.starts_with("t3_session_"))
+        .filter(|(n, _)| *n == "vekrel_session" || n.starts_with("vekrel_session_"))
         .map(|(_, v)| v);
     let auth = h
         .get_all(header::AUTHORIZATION)

@@ -83,13 +83,13 @@ mod tests {
     #[test]
     fn cookie_strings_match_effect_serializer() {
         let c = session_cookie(
-            "t3_session_3789_fb52c29e3256",
+            "vekrel_session_3789_fb52c29e3256",
             "eyJ2Ijox.c2ln-_",
             1_792_742_400_000,
         );
         assert_eq!(
             c,
-            "t3_session_3789_fb52c29e3256=eyJ2Ijox.c2ln-_; Path=/; Expires=Fri, 23 Oct 2026 08:00:00 GMT; HttpOnly; SameSite=Lax"
+            "vekrel_session_3789_fb52c29e3256=eyJ2Ijox.c2ln-_; Path=/; Expires=Fri, 23 Oct 2026 08:00:00 GMT; HttpOnly; SameSite=Lax"
         );
         // `encodeURIComponent("a b=;")`.
         assert!(
@@ -99,8 +99,8 @@ mod tests {
                 .starts_with("n=a%20b%3D%3B; ")
         );
         assert_eq!(
-            clear_cookie("t3_session_3789_fb52c29e3256"),
-            "t3_session_3789_fb52c29e3256=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax"
+            clear_cookie("vekrel_session_3789_fb52c29e3256"),
+            "vekrel_session_3789_fb52c29e3256=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax"
         );
     }
 

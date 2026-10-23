@@ -258,7 +258,7 @@ fn auth_session_shadow_matches_node() {
         .lines()
         .filter_map(|l| {
             let f: Vec<_> = l.split('\t').collect();
-            (f.len() == 7 && f[5].starts_with("t3_session"))
+            (f.len() == 7 && f[5].starts_with("vekrel_session"))
                 .then(|| (f[5].to_owned(), f[6].to_owned()))
         })
         .next()
@@ -359,7 +359,8 @@ fn pair(base: &str, home: &Path, token: &str) -> String {
         .lines()
         .filter_map(|l| {
             let f: Vec<_> = l.split('\t').collect();
-            (f.len() == 7 && f[5].starts_with("t3_session")).then(|| format!("{}={}", f[5], f[6]))
+            (f.len() == 7 && f[5].starts_with("vekrel_session"))
+                .then(|| format!("{}={}", f[5], f[6]))
         })
         .next()
         .expect("session cookie")

@@ -49,7 +49,7 @@ const DEV_SID: &str = "dev-auth-1";
 const NARROW_SID: &str = "6f1c0d3e-0000-4000-8000-000000000002";
 /// A session whose row belongs to another subject than its token claims.
 const OTHER_SUB_SID: &str = "6f1c0d3e-0000-4000-8000-000000000003";
-const DESC: &str = r#"{"policy":"loopback-browser","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"t3_session_3789_fb52c29e3256","serverUpdateScope":"machine:maintain"}"#;
+const DESC: &str = r#"{"policy":"loopback-browser","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"vekrel_session_3789_fb52c29e3256","serverUpdateScope":"machine:maintain"}"#;
 
 fn b64_sha256(s: &str) -> String {
     B64.encode(Sha256::digest(s.as_bytes()))

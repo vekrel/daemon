@@ -41,11 +41,11 @@ const KEY: [u8; 32] = [9; 32];
 const SID: &str = "6f1c0d3e-0000-4000-8000-000000000001";
 const STATE_DIR: &str = "/tmp/vk/userdata";
 /// `sha256("/tmp/vk/userdata").hex.slice(0, 12)` computed with Node's crypto.
-const COOKIE: &str = "t3_session_3789_fb52c29e3256";
+const COOKIE: &str = "vekrel_session_3789_fb52c29e3256";
 /// 2030-01-01T00:00:00.123Z.
 const EXP: i64 = 1_893_456_000_123;
 
-const DESC: &str = r#"{"policy":"loopback-browser","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"t3_session_3789_fb52c29e3256","serverUpdateScope":"machine:maintain"}"#;
+const DESC: &str = r#"{"policy":"loopback-browser","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"vekrel_session_3789_fb52c29e3256","serverUpdateScope":"machine:maintain"}"#;
 
 fn unauth() -> String {
     format!(r#"{{"authenticated":false,"auth":{DESC}}}"#)
@@ -169,7 +169,7 @@ async fn no_credential() {
     let e = Env::ok("none");
     assert_eq!(body(&e, &[]).await, unauth());
     // Another server's cookie on the same host is not this engine's credential.
-    let other = format!("t3_session_3999_aaaaaaaaaaaa={}", mint(&claims()));
+    let other = format!("vekrel_session_3999_aaaaaaaaaaaa={}", mint(&claims()));
     assert_eq!(body(&e, &[("cookie", &other)]).await, unauth());
     // An empty cookie value is "missing" (`!credential?.token`).
     assert_eq!(
@@ -364,7 +364,7 @@ fn descriptor_for_remote_host_uses_machine_id_and_legacy_cookie() {
     let d = Descriptor::web("0.0.0.0", 3789, STATE_DIR, "machine-1");
     assert_eq!(
         serde_json::to_string(&d).unwrap(),
-        r#"{"policy":"remote-reachable","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"t3_session_f7a7266df8b4","serverUpdateScope":"machine:maintain"}"#
+        r#"{"policy":"remote-reachable","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"vekrel_session_f7a7266df8b4","serverUpdateScope":"machine:maintain"}"#
     );
 }
 
@@ -500,7 +500,7 @@ async fn legacy_cookie_goes_to_node_in_serve_mode() {
     let url = proxy(up, Mode::Serve, remote, e.files.clone()).await;
     let (s, h, b) = get(
         &url,
-        &[("cookie", &format!("t3_session={}", mint(&claims())))],
+        &[("cookie", &format!("vekrel_session={}", mint(&claims())))],
     )
     .await;
     assert_eq!((s, b.as_str()), (200, "node"));
@@ -528,7 +528,7 @@ async fn shadow_compares_http_bytes() {
     );
 
     // A different cookie name: mismatch names the JSON path, never the values.
-    let node = unauth().replace(COOKIE, "t3_session_1_000000000000");
+    let node = unauth().replace(COOKIE, "vekrel_session_1_000000000000");
     let (up, _) = engine(200, node.clone()).await;
     let url = proxy(up, Mode::Shadow, desc(), e.files.clone()).await;
     assert_eq!(get(&url, &[]).await.2, node);
@@ -537,7 +537,7 @@ async fn shadow_compares_http_bytes() {
         lines[1].contains("mismatch") && lines[1].contains("$.auth.sessionCookieName"),
         "{lines:?}"
     );
-    assert!(!lines[1].contains("t3_session"), "{lines:?}");
+    assert!(!lines[1].contains("vekrel_session"), "{lines:?}");
 
     // Status difference.
     let (up, _) = engine(500, unauth()).await;

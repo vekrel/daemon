@@ -231,7 +231,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     pub(crate) const KEY: [u8; 32] = [7; 32];
-    pub(crate) const COOKIE: &str = "t3_session_3789_fb52c29e3256";
+    pub(crate) const COOKIE: &str = "vekrel_session_3789_fb52c29e3256";
 
     /// Key + DB with one live row for `payload().sid`, in a temp dir removed on drop.
     pub(crate) struct Env(pub tempfile::TempDir, pub Arc<AuthSession>);

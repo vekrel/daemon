@@ -49,7 +49,7 @@ use vekrel::{
 const KEY: [u8; 32] = [9; 32];
 const SID: &str = "6f1c0d3e-0000-4000-8000-000000000001";
 const STATE_DIR: &str = "/tmp/vk/userdata";
-const COOKIE: &str = "t3_session_3789_fb52c29e3256";
+const COOKIE: &str = "vekrel_session_3789_fb52c29e3256";
 
 const AUTH_ERROR: &str = r#"{"_tag":"Failure","cause":[{"_tag":"Fail","error":{"_tag":"MachineAuthorizationError","message":"The authenticated token is missing required scope: filesystem:read.","requiredScope":"orchestration:read","requiredPermission":"filesystem:read"}}]}"#;
 

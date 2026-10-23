@@ -1067,7 +1067,7 @@ mod tests {
     fn comparator_checks_declared_headers_and_masks_cookies() {
         let ct = ("content-type", "application/json");
         let ck = |tok: &str, exp: &str| {
-            format!("t3_session_1_x={tok}; Path=/; Expires={exp}; HttpOnly; SameSite=Lax")
+            format!("vekrel_session_1_x={tok}; Path=/; Expires={exp}; HttpOnly; SameSite=Lax")
         };
         let d = |n: &[(&str, &str)], r: &[(&str, &str)]| {
             diff(&CMP, StatusCode::OK, &hm(n), b"{}", &rust(200, r, "{}"))
@@ -1109,7 +1109,7 @@ mod tests {
             hdr(&[ct, ("set-cookie", &a)], &[ct, ("set-cookie", &secure)]).as_deref(),
             Some("header set-cookie")
         );
-        let other = a.replace("t3_session_1_x", "t3_session_2_x");
+        let other = a.replace("vekrel_session_1_x", "vekrel_session_2_x");
         assert_eq!(
             hdr(&[ct, ("set-cookie", &a)], &[ct, ("set-cookie", &other)]).as_deref(),
             Some("header set-cookie")

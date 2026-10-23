@@ -51,12 +51,12 @@ impl Descriptor {
                 "dpop-access-token",
             ],
             session_cookie_name: if remote {
-                format!("t3_session_{hash}")
+                format!("vekrel_session_{hash}")
             } else {
-                format!("t3_session_{port}_{hash}")
+                format!("vekrel_session_{port}_{hash}")
             },
             server_update_scope: "machine:maintain",
-            legacy_cookie_name: remote.then_some("t3_session"),
+            legacy_cookie_name: remote.then_some("vekrel_session"),
         }
     }
 
