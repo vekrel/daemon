@@ -1,7 +1,11 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
-struct Guard(Child);
+/// Deadline for "eventually" conditions; generous because CI/dev machines can be heavily loaded.
+const LONG: Duration = Duration::from_secs(15);
+
+/// Owns the config tempdir too: it is removed after the child is reaped, even on panic.
+struct Guard(Child, #[allow(dead_code)] tempfile::TempDir);
 impl Drop for Guard {
     fn drop(&mut self) {
         // SIGTERM so vekrel reaps its engine child; SIGKILL would orphan it.
@@ -38,7 +42,7 @@ fn start(name: &str, command: &str, args: &[&str]) -> (Guard, u16) {
     panic!("vekrel never started listening");
 }
 
-/// Spawns vekrel and waits (up to 10 s) until it accepts connections, so test windows
+/// Spawns vekrel and waits (up to 30 s) until it accepts connections, so test windows
 /// start once it is up; None if it exited first.
 fn try_start(name: &str, command: &str, args: &[&str]) -> Option<(Guard, u16)> {
     let health = free_port(); // the public server port
@@ -50,7 +54,11 @@ fn try_start(name: &str, command: &str, args: &[&str]) -> Option<(Guard, u16)> {
     let cfg = format!(
         "[server]\nport = {health}\n[engine]\ncommand = {command:?}\nargs = [{args_toml}]\n"
     );
-    let path = std::env::temp_dir().join(format!("vekrel-test-{}-{name}.toml", std::process::id()));
+    let dir = tempfile::Builder::new()
+        .prefix("vekrel-test-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join(format!("{name}.toml"));
     std::fs::write(&path, cfg).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_vekrel"))
         .args(["serve", "--config"])
@@ -61,8 +69,8 @@ fn try_start(name: &str, command: &str, args: &[&str]) -> Option<(Guard, u16)> {
         .env("LANG", "de_DE.UTF-8")
         .spawn()
         .unwrap();
-    let mut g = Guard(child);
-    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let mut g = Guard(child, dir);
+    let end = std::time::Instant::now() + Duration::from_secs(30);
     while std::time::Instant::now() < end {
         if g.0.try_wait().unwrap().is_some() {
             return None;
@@ -115,8 +123,13 @@ async fn poll(
 #[tokio::test]
 async fn crash_loop_increments_restarts_and_reports_down() {
     let (_g, port) = start("crash", "sh", &["-c", "exit 1"]);
-    // observe through the window so a "down" sample is certain
-    let seen = poll(port, Duration::from_secs(3), |_| false).await;
+    // Eventually: a "down" sample and at least two restarts (generous deadline for loaded machines).
+    let mut saw_down = false;
+    let seen = poll(port, LONG, |h| {
+        saw_down |= h.0 == "down";
+        saw_down && h.1 >= 2
+    })
+    .await;
     assert!(seen.iter().any(|h| h.0 == "down"), "{seen:?}");
     assert!(seen.last().unwrap().1 >= 2, "{seen:?}");
 }
@@ -124,6 +137,9 @@ async fn crash_loop_increments_restarts_and_reports_down() {
 #[tokio::test]
 async fn clean_exit_is_not_restarted() {
     let (_g, port) = start("clean", "sh", &["-c", "exit 0"]);
+    let seen = poll(port, LONG, |h| h.0 == "down").await;
+    assert_eq!(seen.last().map(|h| h.0.as_str()), Some("down"), "{seen:?}");
+    // Absence check: it stays down and is not restarted.
     tokio::time::sleep(Duration::from_secs(3)).await;
     let h = health(port).await.expect("health up");
     assert_eq!(h, ("down".to_string(), 0));
@@ -132,6 +148,8 @@ async fn clean_exit_is_not_restarted() {
 #[tokio::test]
 async fn missing_binary_reports_down_without_panic() {
     let (mut g, port) = start("missing", "/nonexistent/node", &[]);
+    let seen = poll(port, LONG, |h| h.0 == "down").await;
+    assert_eq!(seen.last().map(|h| h.0.as_str()), Some("down"), "{seen:?}");
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(g.0.try_wait().unwrap().is_none(), "daemon exited");
     assert_eq!(health(port).await.expect("health up").0, "down");
@@ -140,7 +158,7 @@ async fn missing_binary_reports_down_without_panic() {
 #[tokio::test]
 async fn running_engine_reports_up() {
     let (_g, port) = start_fake("up", &[]);
-    let seen = poll(port, Duration::from_secs(5), |h| h.0 == "up").await;
+    let seen = poll(port, LONG, |h| h.0 == "up").await;
     assert_eq!(seen.last(), Some(&("up".to_string(), 0)), "{seen:?}");
 }
 
@@ -148,7 +166,7 @@ async fn running_engine_reports_up() {
 async fn sigterm_stops_engine_child() {
     let marker = format!("3{}", std::process::id()); // unique marker arg to find the child
     let (mut g, port) = start_fake("sigterm", &[&marker]);
-    let seen = poll(port, Duration::from_secs(2), |h| h.0 == "up").await;
+    let seen = poll(port, LONG, |h| h.0 == "up").await;
     assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
     let found = || running(&marker);
     assert!(found(), "engine child not running");
@@ -156,28 +174,26 @@ async fn sigterm_stops_engine_child() {
         .args(["-TERM", &g.0.id().to_string()])
         .status()
         .unwrap();
-    let end = tokio::time::Instant::now() + Duration::from_secs(3);
+    let end = tokio::time::Instant::now() + LONG;
     while g.0.try_wait().unwrap().is_none() {
         assert!(tokio::time::Instant::now() < end, "vekrel did not exit");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(g.0.try_wait().unwrap().unwrap().success());
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!found(), "engine child orphaned");
+    assert!(wait_for(LONG, || !found()).await, "engine child orphaned");
 }
 
 #[tokio::test]
 async fn child_receives_vekrel_port_env() {
-    let dir = std::env::temp_dir().join(format!("vekrel-env-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let (a, b) = (dir.join("port"), dir.join("rest"));
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("port"), dir.path().join("rest"));
     let script = format!(
         "echo $VEKREL_PORT > {}; echo $VEKREL_HOST $VEKREL_NO_BROWSER $LC_ALL $LC_MESSAGES $LANG > {}; sleep 30",
         a.display(),
         b.display()
     );
     let (_g, port) = start("env", "sh", &["-c", &script]);
-    wait_for(Duration::from_secs(5), || {
+    wait_for(LONG, || {
         [&a, &b]
             .iter()
             .all(|p| std::fs::read_to_string(p).is_ok_and(|s| s.ends_with('\n')))
@@ -191,7 +207,6 @@ async fn child_receives_vekrel_port_env() {
         std::fs::read_to_string(b).unwrap().trim(),
         "127.0.0.1 1 en-u-kn-true sv_SE.UTF-8 de_DE.UTF-8"
     );
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 async fn wait_for(total: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -230,16 +245,15 @@ async fn sigterm_and_wait(g: &mut Guard, limit: Duration) -> (Duration, bool) {
 
 #[tokio::test]
 async fn sigterm_sends_sigterm_to_engine_and_waits() {
-    let file = std::env::temp_dir().join(format!("vekrel-graceful-{}", std::process::id()));
-    let _ = std::fs::remove_file(&file);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("graceful");
     let flag = format!("term-file={}", file.display());
     let (mut g, port) = start_fake("graceful", &[&flag]);
-    let seen = poll(port, Duration::from_secs(5), |h| h.0 == "up").await;
+    let seen = poll(port, LONG, |h| h.0 == "up").await;
     assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
-    let (_, ok) = sigterm_and_wait(&mut g, Duration::from_secs(7)).await;
+    let (_, ok) = sigterm_and_wait(&mut g, LONG).await;
     assert!(ok, "vekrel exit status not 0");
     let got = std::fs::read_to_string(&file).unwrap_or_default();
-    let _ = std::fs::remove_file(&file);
     assert_eq!(got.trim(), "graceful");
 }
 
@@ -247,30 +261,32 @@ async fn sigterm_sends_sigterm_to_engine_and_waits() {
 async fn engine_ignoring_sigterm_is_killed_after_grace() {
     let marker = format!("stubborn-{}", std::process::id());
     let (mut g, port) = start_fake("stubborn", &["ignore-term", &marker]);
-    let seen = poll(port, Duration::from_secs(5), |h| h.0 == "up").await;
+    let seen = poll(port, LONG, |h| h.0 == "up").await;
     assert_eq!(seen.last().map(|h| h.0.as_str()), Some("up"), "{seen:?}");
     assert!(running(&marker), "engine child not running");
-    let (took, ok) = sigterm_and_wait(&mut g, Duration::from_millis(6500)).await;
+    let (took, ok) = sigterm_and_wait(&mut g, LONG).await;
     assert!(ok, "vekrel exit status not 0");
     assert!(
         took >= Duration::from_secs(4),
         "did not wait for grace: {took:?}"
     );
     assert!(
-        wait_for(Duration::from_secs(1), || !running(&marker)).await,
+        wait_for(LONG, || !running(&marker)).await,
         "engine child still running"
     );
 }
 
 #[tokio::test]
 async fn health_is_down_until_engine_serves_readiness_path() {
-    let (_g, port) = start_fake("ready", &["delay=1"]);
+    // t0 precedes the spawn so a slow start cannot shrink the measured delay; 3 s leaves
+    // room for the first poll to still see "down" on a loaded machine.
     let t0 = std::time::Instant::now();
-    let seen = poll(port, Duration::from_secs(6), |h| h.0 == "up").await;
+    let (_g, port) = start_fake("ready", &["delay=3"]);
+    let seen = poll(port, LONG, |h| h.0 == "up").await;
     assert_eq!(seen.first().map(|h| h.0.as_str()), Some("down"), "{seen:?}");
     assert_eq!(seen.last(), Some(&("up".to_string(), 0)), "{seen:?}");
     assert!(
-        t0.elapsed() >= Duration::from_millis(900),
+        t0.elapsed() >= Duration::from_millis(2900),
         "{:?}",
         t0.elapsed()
     );

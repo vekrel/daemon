@@ -220,11 +220,17 @@ mod tests {
     const K: [u8; 32] = [7; 32];
 
     /// A Shadow over a temp DB holding one row for `payload().sid`.
-    fn shadow(name: &str, subject: &str, scopes: &str, expires_at: &str) -> (AuthFiles, PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("vekrel-shadow-unit-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn shadow(
+        name: &str,
+        subject: &str,
+        scopes: &str,
+        expires_at: &str,
+    ) -> (AuthFiles, tempfile::TempDir) {
+        let t = tempfile::Builder::new()
+            .prefix(&format!("vekrel-shadow-unit-{name}-"))
+            .tempdir()
+            .unwrap();
+        let dir = t.path().to_path_buf();
         let db = dir.join("statev2.sqlite");
         let c = rusqlite::Connection::open(&db).unwrap();
         c.execute_batch(DDL).unwrap();
@@ -235,14 +241,12 @@ mod tests {
         )
         .unwrap();
         let s = AuthFiles::new(dir.join("server-signing-key.bin"), db);
-        (s, dir)
+        (s, t)
     }
 
     fn check(name: &str, subject: &str, scopes: &str, expires_at: &str) -> Outcome {
-        let (s, dir) = shadow(name, subject, scopes, expires_at);
-        let o = s.verify(&mint(&payload(), &K), &K);
-        std::fs::remove_dir_all(dir).unwrap();
-        o
+        let (s, _dir) = shadow(name, subject, scopes, expires_at);
+        s.verify(&mint(&payload(), &K), &K)
     }
 
     #[test]
@@ -276,7 +280,7 @@ mod tests {
     #[test]
     fn row_scopes_override_token_scopes() {
         // Row narrowed to a subset of the token's scopes (e.g. a later downgrade): row wins.
-        let (s, dir) = shadow(
+        let (s, _dir) = shadow(
             "scopes",
             "browser",
             r#"["orchestration:read"]"#,
@@ -285,7 +289,6 @@ mod tests {
         let mut p = payload();
         p.scopes.push("orchestration:write".into());
         let o = s.verify(&mint(&p, &K), &K);
-        std::fs::remove_dir_all(dir).unwrap();
         assert_eq!(
             o,
             Outcome::Verified {
@@ -307,7 +310,7 @@ mod tests {
 
     #[test]
     fn method_mismatch_is_mismatch() {
-        let (s, dir) = shadow(
+        let (s, _dir) = shadow(
             "method",
             "browser",
             r#"["orchestration:read"]"#,
@@ -316,13 +319,12 @@ mod tests {
         let mut p = payload();
         p.method = "bearer-access-token".into();
         let o = s.verify(&mint(&p, &K), &K);
-        std::fs::remove_dir_all(dir).unwrap();
         assert_eq!(o, Outcome::Mismatch);
     }
 
     #[test]
     fn key_is_reread_when_its_mtime_changes() {
-        let (s, dir) = shadow(
+        let (s, _dir) = shadow(
             "rekey",
             "browser",
             r#"["orchestration:read"]"#,
@@ -342,7 +344,6 @@ mod tests {
         set(K, 2_000);
         let t = mint(&payload(), &K);
         assert!(matches!(s.check(vec![t]), Outcome::Verified { .. }));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

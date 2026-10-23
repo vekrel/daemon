@@ -83,10 +83,8 @@ pub(crate) mod tests {
 
     #[test]
     fn finds_an_inserted_row() {
-        let dir = std::env::temp_dir().join(format!("vekrel-sessions-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("statev2.sqlite");
-        let _ = std::fs::remove_file(&db);
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("statev2.sqlite");
         let c = Connection::open(&db).unwrap();
         c.execute_batch(DDL).unwrap();
         c.execute(
@@ -107,7 +105,6 @@ pub(crate) mod tests {
             })
         );
         assert_eq!(s.lookup("nope").unwrap(), None);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

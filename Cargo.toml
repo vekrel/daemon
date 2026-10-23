@@ -35,3 +35,4 @@ replay = []
 # Self dev-dependency so `cargo test` builds the lib with `replay` for tests/replay.rs.
 vekrel = { path = ".", features = ["replay"] }
 reqwest = { version = "0.13.5", features = ["json"] }
+tempfile = "3"

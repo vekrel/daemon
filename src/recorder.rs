@@ -215,8 +215,8 @@ mod tests {
     #[test]
     fn recording_file_and_dir_are_private() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("vekrel-perm-{}", std::process::id()));
-        let dir = root.join("recordings");
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("recordings");
         // Pre-existing, too-open dir must be tightened.
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -224,6 +224,5 @@ mod tests {
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(rec.path()), 0o600);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

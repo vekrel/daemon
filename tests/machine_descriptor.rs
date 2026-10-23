@@ -31,11 +31,14 @@ use vekrel::{
 
 const GOLDEN: &str = include_str!("golden/machine_descriptor.json");
 
-fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("vk-md-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// The guard removes the dir on drop, including on panic.
+fn tmp(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let t = tempfile::Builder::new()
+        .prefix(&format!("vk-md-{name}-"))
+        .tempdir()
+        .unwrap();
+    let d = t.path().to_path_buf();
+    (t, d)
 }
 
 fn machine() -> Machine {
@@ -70,7 +73,7 @@ fn unknown_machine_kind_omits_the_key_and_publishing_flips_in_place() {
 
 #[test]
 fn publishing_needs_true_flag_url_and_credential() {
-    let d = tmp("secrets");
+    let (_t, d) = tmp("secrets");
     let put = |n: &str, v: &[u8]| std::fs::write(d.join(format!("{n}.bin")), v).unwrap();
     assert!(!agent_activity_publishing(&d), "missing files");
     put("cloud-publish-agent-activity", b"true");
@@ -90,7 +93,6 @@ fn publishing_needs_true_flag_url_and_credential() {
     std::fs::remove_file(d.join("cloud-relay-url.bin")).unwrap();
     std::fs::create_dir(d.join("cloud-relay-url.bin")).unwrap();
     assert!(!agent_activity_publishing(&d));
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 fn engine(command: &str, args: &[&str]) -> EngineConfig {
@@ -111,7 +113,7 @@ fn fake_engine(root: &Path, rel: &str) -> PathBuf {
 
 #[test]
 fn supported_engine_declines_what_rust_cannot_reproduce() {
-    let d = tmp("decline");
+    let (_t, d) = tmp("decline");
     let bin = fake_engine(&d, "apps/server/dist/bin.mjs");
     let bin = bin.to_str().unwrap();
     let none = |_: &str| None;
@@ -144,7 +146,6 @@ fn supported_engine_declines_what_rust_cannot_reproduce() {
             "{rel}"
         );
     }
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// A fake engine whose descriptor reply can change between "restarts".
@@ -169,7 +170,7 @@ fn node_reply(version: &str) -> String {
 }
 
 struct Rig {
-    d: PathBuf,
+    _t: tempfile::TempDir,
     state: Arc<State>,
     ctx: HandlerCtx,
     reply: Arc<Mutex<String>>,
@@ -179,7 +180,7 @@ struct Rig {
 }
 
 async fn rig(name: &str, probe_ok: bool) -> Rig {
-    let d = tmp(name);
+    let (t, d) = tmp(name);
     let state_dir = d.join("userdata");
     std::fs::create_dir_all(state_dir.join("secrets")).unwrap();
     std::fs::write(
@@ -212,7 +213,7 @@ async fn rig(name: &str, probe_ok: bool) -> Rig {
         .unwrap()
         .into_parts();
     Rig {
-        d,
+        _t: t,
         state,
         ctx,
         reply,
@@ -293,7 +294,6 @@ async fn none_until_nodes_descriptor_is_fetched_then_follows_each_generation() {
     assert_eq!(v["serverVersion"], "9.9.9");
     assert_eq!(v["machineId"], "22222222-2222-4333-8444-555555555555");
     assert_eq!(r.probes.load(Ordering::SeqCst), 2);
-    std::fs::remove_dir_all(&r.d).unwrap();
 }
 
 #[tokio::test]
@@ -303,5 +303,4 @@ async fn probe_timeout_leaves_the_generation_to_node() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(r.probes.load(Ordering::SeqCst) >= 1);
     assert!(r.get().await.is_none());
-    std::fs::remove_dir_all(&r.d).unwrap();
 }

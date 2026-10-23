@@ -46,9 +46,13 @@ fn mint(exp: i64) -> String {
     format!("{enc}.{}", B64.encode(mac.finalize().into_bytes()))
 }
 
-fn state(name: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("vekrel-shadow-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+/// The TempDir removes the state on drop, including on panic.
+fn state(name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let t = tempfile::Builder::new()
+        .prefix(&format!("vekrel-shadow-{name}-"))
+        .tempdir()
+        .unwrap();
+    let dir = t.path().to_path_buf();
     std::fs::create_dir_all(dir.join("secrets")).unwrap();
     let key = dir.join("secrets/server-signing-key.bin");
     std::fs::write(&key, KEY).unwrap();
@@ -61,7 +65,7 @@ fn state(name: &str) -> (PathBuf, PathBuf) {
         [SID],
     )
     .unwrap();
-    (key, db)
+    (t, key, db)
 }
 
 #[derive(Clone, Default)]
@@ -117,7 +121,7 @@ async fn run(name: &str, cookie: Option<String>) -> (u16, String, Option<String>
     let up_port = ul.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(ul, up).await.unwrap() });
 
-    let (key, db) = state(name);
+    let (_t, key, db) = state(name);
     let pl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = pl.local_addr().unwrap().port();
     let app = shadow::apply(
@@ -144,7 +148,6 @@ async fn run(name: &str, cookie: Option<String>) -> (u16, String, Option<String>
     let r = rb.send().await.unwrap();
     let status = r.status().as_u16();
     let body = r.text().await.unwrap();
-    let _ = std::fs::remove_dir_all(key.parent().unwrap().parent().unwrap());
     let got = seen.lock().unwrap().clone();
     assert_eq!(got, cookie, "upstream must see the cookie unchanged");
     (status, body, got, logs.warns())
@@ -196,7 +199,7 @@ async fn expired_token_warns_expired() {
 #[tokio::test]
 async fn bearer_token_for_unknown_session_warns() {
     let t = mint(i64::MAX); // its row is deleted below
-    let (key, db) = state("unknown-db");
+    let (_t, key, db) = state("unknown-db");
     rusqlite::Connection::open(&db)
         .unwrap()
         .execute("DELETE FROM auth_sessions", [])
@@ -224,7 +227,6 @@ async fn bearer_token_for_unknown_session_warns() {
         .await
         .unwrap();
     assert_eq!(r.text().await.unwrap(), "ok");
-    let _ = std::fs::remove_dir_all(key.parent().unwrap().parent().unwrap());
     let warns = logs.warns();
     assert_eq!(warns.len(), 1, "{warns:?}");
     assert!(warns[0].contains("UnknownSession"));
