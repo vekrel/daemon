@@ -98,13 +98,15 @@ pub async fn handler(
     // The session Node sees on this upgrade; only computed when Rust claims some RPC tag.
     let rpc = ctx.upstream.rpc.clone();
     let path = uri.path_and_query().map_or("/ws", |p| p.as_str());
-    let client_url = match headers.get(header::HOST).map(|h| h.to_str()) {
-        Some(Err(_)) => None,
-        host => dpop::request_url(host.and_then(Result::ok), path),
-    };
+    let client_url =
+        crate::proxy_http::client_url(headers.get(header::HOST), ctx.upstream.public_port, path);
+    // Converts a DPoP upgrade into a Rust ticket for Node: Node behind the proxy builds `htu` from
+    // the rewritten Host and would reject every valid proof. Only for a trusted origin (above) and
+    // a session Node's ticket verifier sees the same way (`http_auth::check`).
     let dctx = DpopCtx {
         url: client_url.clone().filter(|_| rpc.dpop_mode() != Mode::Off),
         serve: rpc.dpop_mode() == Mode::Serve,
+        for_ticket: true,
         ..DpopCtx::default()
     };
     let session = rpc.session(req.headers(), uri.query(), &dctx).await;

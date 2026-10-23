@@ -33,6 +33,26 @@ pub(crate) fn strip_hop_by_hop(h: &mut HeaderMap) {
     }
 }
 
+/// `Host` is one of the daemon's own public origins: `127.0.0.1`, `localhost` or `[::1]` on
+/// `public_port` (case-insensitive).
+pub(crate) fn trusted_host(v: &HeaderValue, public_port: u16) -> bool {
+    let v = v.to_str().unwrap_or("").to_ascii_lowercase();
+    ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|n| v == format!("{n}:{public_port}"))
+}
+
+/// The URL a client signs a DPoP `htu` for, but only on the daemon's own origins: another Host
+/// (DNS rebinding, a forwarded name) is Node's to judge. `path` must be origin-form.
+pub(crate) fn client_url(
+    host: Option<&HeaderValue>,
+    public_port: u16,
+    path: &str,
+) -> Option<String> {
+    let host = host.filter(|h| trusted_host(h, public_port))?;
+    crate::auth::dpop::request_url(Some(host.to_str().ok()?), path)
+}
+
 /// Lets the engine's origin check trust a browser that reached it through this proxy.
 pub(crate) fn add_forwarded(
     h: &mut HeaderMap,
@@ -42,12 +62,7 @@ pub(crate) fn add_forwarded(
 ) {
     // Only a loopback authority on our port is vouched for; anything else (DNS rebinding)
     // gets no header, so the engine's own origin check decides.
-    let host = host.filter(|v| {
-        let v = v.to_str().unwrap_or("").to_ascii_lowercase();
-        ["127.0.0.1", "localhost", "[::1]"]
-            .iter()
-            .any(|n| v == format!("{n}:{public_port}"))
-    });
+    let host = host.filter(|v| trusted_host(v, public_port));
     h.insert("x-vekrel-proxy", HeaderValue::from_static("1"));
     h.insert("x-forwarded-proto", HeaderValue::from_static("http"));
     match host {
@@ -90,11 +105,15 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
     // The URL the client used, for DPoP `htu`; absolute-form targets are Node's.
-    let client_url = match req.headers().get(header::HOST).map(|h| h.to_str()) {
-        Some(Err(_)) => None,
-        _ if original_absolute => None,
-        host => dpop::request_url(host.and_then(Result::ok), &original_path),
-    };
+    let client_url = (!original_absolute)
+        .then(|| {
+            client_url(
+                req.headers().get(header::HOST),
+                upstream.public_port,
+                &original_path,
+            )
+        })
+        .flatten();
     let h = req.headers_mut();
     let client_host = h.get(header::HOST).cloned();
     strip_hop_by_hop(h);

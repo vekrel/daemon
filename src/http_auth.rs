@@ -85,6 +85,9 @@ pub struct DpopCtx {
     pub serve: bool,
     /// When the proxy received the request (shadow: markers newer than this are Node's own).
     pub arrived: SystemTime,
+    /// `/ws`: Rust hands Node a ticket for the session instead of the proof, so the claims must be
+    /// what Node's ticket verifier reads from the row; anything else stays Node's.
+    pub for_ticket: bool,
     /// The marker Rust published and the session it authenticated, once it has.
     pub consumed: Arc<Mutex<Option<(PathBuf, String)>>>,
 }
@@ -94,6 +97,7 @@ impl Default for DpopCtx {
         DpopCtx {
             url: None,
             serve: false,
+            for_ticket: false,
             arrived: SystemTime::now(),
             consumed: Arc::default(),
         }
@@ -109,6 +113,16 @@ impl DpopCtx {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Node's `verifyWebSocketToken` takes scopes, method and expiry from the row: they must equal
+/// the token's claims, and reusable dev-token sessions stay Node's (as in `WsTicket::handle`).
+fn ticket_sees_the_same(files: &AuthFiles, p: &Payload) -> bool {
+    if p.sid.starts_with("dev-auth-") {
+        return false;
+    }
+    matches!(files.lookup(&p.sid), Some(Some(r))
+        if r.revoked_at.is_none() && r.scopes == p.scopes && r.method == p.method && r.expires_at_ms == p.exp)
 }
 
 /// `request.headers.dpop`: `Some(None)` when absent; `None` (Node's) when repeated or not ASCII.
@@ -156,6 +170,9 @@ pub(crate) fn check(
         Verdict::Fail(why) => return Some(Err(Some(why))),
         Verdict::Decline => return None,
     };
+    if ctx.for_ticket && !ticket_sees_the_same(files, &p) {
+        return None;
+    }
     let secrets = files.secrets_dir()?;
     let replay = if ctx.serve {
         match replay::create(secrets, &proof, now.as_millis() as i64) {

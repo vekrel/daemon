@@ -43,6 +43,10 @@ use vekrel::{
 
 const KEY: [u8; 32] = [9; 32];
 const SID: &str = "6f1c0d3e-0000-4000-8000-000000000001";
+/// A reusable dev-token session: never converted to a ticket.
+const DEV_SID: &str = "dev-auth-1";
+/// A session whose row grants fewer scopes than its token claims.
+const NARROW_SID: &str = "6f1c0d3e-0000-4000-8000-000000000002";
 const DESC: &str = r#"{"policy":"loopback-browser","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"t3_session_3789_fb52c29e3256","serverUpdateScope":"machine:maintain"}"#;
 
 fn b64_sha256(s: &str) -> String {
@@ -91,7 +95,12 @@ fn client() -> Client {
 
 /// The engine's `SessionStore.issue` format for a DPoP-bound session.
 fn token() -> String {
-    let c = json!({"v":1,"kind":"session","sid":SID,"sub":"native",
+    token_for(SID)
+}
+
+/// `token()` for another session id (the rows in `home()`).
+fn token_for(sid: &str) -> String {
+    let c = json!({"v":1,"kind":"session","sid":sid,"sub":"native",
         "scopes":["orchestration:read","filesystem:read"],"method":"dpop-access-token",
         "jkt":client().thumbprint(),"iat":1,"exp":1_893_456_000_123i64});
     let enc = B64.encode(c.to_string());
@@ -126,8 +135,12 @@ fn home() -> (tempfile::TempDir, Arc<AuthFiles>) {
     .unwrap();
     c.execute(
         "INSERT INTO auth_sessions VALUES (?1, 'native', '[\"orchestration:read\",\"filesystem:read\"]',
-         'dpop-access-token', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z', NULL)",
-        [SID],
+         'dpop-access-token', '2026-01-01T00:00:00.000Z', '2030-01-01T00:00:00.123Z', NULL),
+         (?2, 'native', '[\"orchestration:read\",\"filesystem:read\"]',
+         'dpop-access-token', '2026-01-01T00:00:00.000Z', '2030-01-01T00:00:00.123Z', NULL),
+         (?3, 'native', '[\"orchestration:read\"]',
+         'dpop-access-token', '2026-01-01T00:00:00.000Z', '2030-01-01T00:00:00.123Z', NULL)",
+        [SID, DEV_SID, NARROW_SID],
     )
     .unwrap();
     let files = Arc::new(AuthFiles::new(
@@ -216,8 +229,16 @@ fn session_handler(files: &Arc<AuthFiles>) -> Arc<AuthSession> {
 
 /// (status, served by Rust, body).
 async fn fetch(port: u16, proof: &str) -> (u16, bool, String) {
-    let r = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/api/auth/session?x=1"))
+    fetch_as(port, None, proof).await
+}
+
+/// `fetch` with an explicit `Host` header.
+async fn fetch_as(port: u16, host: Option<&str>, proof: &str) -> (u16, bool, String) {
+    let mut r = reqwest::Client::new().get(format!("http://127.0.0.1:{port}/api/auth/session?x=1"));
+    if let Some(h) = host {
+        r = r.header("host", h);
+    }
+    let r = r
         .header("authorization", format!("DPoP {}", token()))
         .header("dpop", proof)
         .send()
@@ -503,4 +524,94 @@ async fn ws_dpop_in_shadow_forwards_the_proof_and_writes_nothing() {
     assert_eq!(q, "");
     assert_eq!(h["dpop"], proof.as_str(), "Node judges the proof itself");
     assert!(markers(home.path()).is_empty());
+}
+
+#[tokio::test]
+async fn a_foreign_host_is_never_verified_and_goes_to_node() {
+    let (home, files) = home();
+    let seen = Seen::default();
+    let (port, _) = proxy(Mode::Serve, session_handler(&files), seen.clone()).await;
+    // A proof that is right for the URL the (rebinding) client claims.
+    let host = format!("evil.example:{port}");
+    let proof = client().proof(
+        "GET",
+        &format!("http://{host}/api/auth/session"),
+        "e1",
+        &token(),
+    );
+    let (_, rust, _) = fetch_as(port, Some(&host), &proof).await;
+    assert!(!rust, "declined to Node");
+    assert_eq!(seen.0.lock().unwrap()[0]["dpop"], proof.as_str());
+    assert!(
+        markers(home.path()).is_empty(),
+        "never verified, never consumed"
+    );
+    // The daemon's own origins, any case.
+    let host = format!("LocalHost:{port}");
+    let proof = client().proof(
+        "GET",
+        &format!("http://localhost:{port}/api/auth/session"),
+        "e2",
+        &token(),
+    );
+    assert_eq!(
+        fetch_as(port, Some(&host), &proof).await,
+        (200, true, verified())
+    );
+}
+
+/// A `/ws` proxy over `ws_engine` with ReadFile served and DPoP in serve; returns the port.
+async fn ws_proxy(files: &Arc<AuthFiles>, seen: Arc<Mutex<Vec<(String, HeaderMap)>>>) -> u16 {
+    let up = ws_engine(seen).await;
+    let handlers: Vec<(Arc<dyn UnaryHandler>, Mode)> = vec![(Arc::new(ReadFile), Mode::Serve)];
+    let rpc = rpc_seam::Seam::new(handlers)
+        .with_auth(session_handler(files))
+        .with_dpop_mode(Mode::Serve);
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let app = server::build(
+        Arc::new(State::default()),
+        server::Upstream::loopback(up)
+            .with_public_port(port)
+            .with_rpc_seam(rpc),
+    );
+    tokio::spawn(serve_app(l, app));
+    port
+}
+
+#[tokio::test]
+async fn ws_conversion_only_for_trusted_origins_and_sessions_node_sees_the_same() {
+    let (home, files) = home();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let port = ws_proxy(&files, seen.clone()).await;
+    let cases = [
+        // (Host, token, converted)
+        (format!("evil.example:{port}"), token(), false),
+        (format!("127.0.0.1:{port}"), token_for(NARROW_SID), false),
+        (format!("127.0.0.1:{port}"), token_for(DEV_SID), false),
+        (format!("[::1]:{port}"), token(), true),
+    ];
+    for (i, (host, tok, converted)) in cases.iter().enumerate() {
+        let mut req = format!("ws://127.0.0.1:{port}/ws")
+            .into_client_request()
+            .unwrap();
+        let proof = client().proof("GET", &format!("http://{host}/ws"), &format!("c{i}"), tok);
+        let h = req.headers_mut();
+        h.insert("host", host.parse().unwrap());
+        h.insert("authorization", format!("DPoP {tok}").parse().unwrap());
+        h.insert("dpop", proof.parse().unwrap());
+        let (_, res) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("upgrade");
+        assert_eq!(res.status(), 101);
+        let (q, h) = seen.lock().unwrap()[i].clone();
+        assert_eq!(q.contains("wsTicket="), *converted, "{host} {q}");
+        // Deferred: Node gets the original credentials, unchanged.
+        assert_eq!(h.contains_key("dpop"), !converted, "{host}");
+        assert_eq!(
+            markers(home.path()).len(),
+            usize::from(*converted),
+            "{host}"
+        );
+    }
 }
