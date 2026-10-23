@@ -68,7 +68,7 @@ fn pairing_code() -> Option<String> {
 }
 
 /// `crypto.randomUUIDv4()`: lowercase, hyphenated.
-fn uuid_v4() -> Option<String> {
+pub(crate) fn uuid_v4() -> Option<String> {
     let mut b = [0u8; 16];
     getrandom::fill(&mut b).ok()?;
     b[6] = (b[6] & 0x0f) | 0x40;

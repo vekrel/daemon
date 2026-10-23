@@ -4,6 +4,7 @@ pub mod auth_access;
 pub mod auth_session;
 pub mod browse;
 pub mod machine_descriptor;
+pub mod pairing;
 pub mod pairing_links;
 pub mod read_file;
 pub mod ws_ticket;

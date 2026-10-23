@@ -1,4 +1,5 @@
 //! Shadow verification of the engine's session tokens (observe only, never blocks).
+pub mod bypass;
 pub mod dpop;
 pub mod registry;
 pub mod replay;

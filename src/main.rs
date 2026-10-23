@@ -4,7 +4,7 @@ use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
     handlers::{
-        HandlerCtx, auth_access, auth_session, browse, machine_descriptor, pairing_links,
+        HandlerCtx, auth_access, auth_session, browse, machine_descriptor, pairing, pairing_links,
         read_file, ws_ticket,
     },
     http_seam::{self, RouteHandler, Seam},
@@ -92,12 +92,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The supervisor pins the engine to VEKREL_HOST=127.0.0.1, so no machine id is needed.
                 let desc = auth_session::Descriptor::web("127.0.0.1", engine_port, dir, "");
                 let auth = Arc::new(auth_session::AuthSession::new(desc, files.clone()));
-                let routes: [Arc<dyn RouteHandler>; 5] = [
+                let tailscale =
+                    auth_access::tailscale_serve(&cfg.engine.args, |k| std::env::var(k).ok());
+                // Also gates the pairing writes: Node's own stream must see them when it serves.
+                let access = Arc::new(auth_access::AuthAccess::new(
+                    files.clone(),
+                    rpc.registry().clone(),
+                    tailscale,
+                ));
+                let routes: [Arc<dyn RouteHandler>; 7] = [
                     auth.clone(),
                     Arc::new(ws_ticket::WsTicket(auth.clone())),
                     Arc::new(pairing_links::CreatePairingToken(auth.clone())),
                     Arc::new(pairing_links::ListPairingLinks(auth.clone())),
                     Arc::new(pairing_links::RevokePairingLink(auth.clone())),
+                    Arc::new(pairing::BrowserSession(auth.clone(), access.clone())),
+                    Arc::new(pairing::Token(auth.clone(), access.clone())),
                 ];
                 for h in routes {
                     let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
@@ -105,11 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // Without it (unsupported engine config) WS sessions are deferred: serve forwards to Node.
                 rpc = rpc.with_auth(auth);
-                let tailscale =
-                    auth_access::tailscale_serve(&cfg.engine.args, |k| std::env::var(k).ok());
-                let access =
-                    auth_access::AuthAccess::new(files.clone(), rpc.registry().clone(), tailscale);
-                let h: Arc<dyn rpc_seam::StreamHandler> = Arc::new(access);
+                let h: Arc<dyn rpc_seam::StreamHandler> = access;
                 let mode = cfg.rust.mode(h.tag(), h.default_mode());
                 rpc = rpc.with_stream(mode, h);
             }

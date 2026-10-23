@@ -181,10 +181,16 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         http_seam::key(&*h),
         h.compare(),
     );
-    let rust = upstream.shadow.spawn(
+    let dry_run = h.dry_run();
+    let mut rust = upstream.shadow.spawn(
         &route,
         async move { h.handle(&rust_parts, &seam.ctx).await },
     );
+    // A dry run predicts from the DB as it is before Node's write.
+    if dry_run && let Some(j) = rust.take() {
+        let r = j.await.ok().flatten();
+        rust = Some(tokio::spawn(std::future::ready(r)));
+    }
     let node = forward(&upstream, Request::from_parts(parts, body)).await;
     match rust {
         Some(rust) => http_seam::tee(node, rust, route, cmp, htu),

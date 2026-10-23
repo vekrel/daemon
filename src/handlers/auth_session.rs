@@ -96,6 +96,33 @@ impl AuthSession {
     pub(crate) fn files(&self) -> &Arc<AuthFiles> {
         &self.files
     }
+
+    pub(crate) fn cookie_name(&self) -> &str {
+        self.desc.cookie_name()
+    }
+
+    /// `selectRequestCredential` + `isBrowserCookieCredential` as `browserSession` uses them: the
+    /// session cookie's token, `Some(None)` for another or no credential. `None` (Node's): the
+    /// legacy cookie, `%` in the token, non-ASCII headers.
+    pub(crate) fn browser_cookie(&self, h: &HeaderMap) -> Option<Option<String>> {
+        let cookie_header = joined(h, header::COOKIE, "; ")?;
+        let cookies = parse_cookies(cookie_header.as_deref().unwrap_or(""));
+        let authz = match h.get(header::AUTHORIZATION) {
+            Some(v) => Some(v.to_str().ok()?),
+            None => None,
+        };
+        if let Some(t) = cookies.get(self.desc.cookie_name()) {
+            return (!t.contains('%')).then(|| Some((*t).to_owned()));
+        }
+        if prefixed(authz, "Bearer ")
+            .or(prefixed(authz, "DPoP "))
+            .is_some()
+        {
+            return Some(None);
+        }
+        let legacy = self.desc.legacy_cookie_name;
+        (!legacy.is_some_and(|n| cookies.contains_key(n))).then_some(None)
+    }
 }
 
 impl RouteHandler for AuthSession {

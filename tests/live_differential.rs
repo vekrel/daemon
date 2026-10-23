@@ -1930,3 +1930,582 @@ fn pairing_links_shadow_matches_and_serve_writes_like_node() {
     drop((da, db));
     assert!(!home_a.exists() && !home_b.exists());
 }
+
+// ---- pairing consume: POST /api/auth/browser-session, POST /oauth/token ----
+
+/// The engine port from a live home's config.
+fn engine_port(home: &Path) -> String {
+    let cfg = std::fs::read_to_string(home.join("vekrel.toml")).unwrap();
+    cfg.split("[engine]")
+        .nth(1)
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("port = ")))
+        .unwrap()
+        .to_owned()
+}
+
+/// One response, normalised: status, the credential headers, the body with tokens, trace ids
+/// and times replaced (`expires_in` rounded to the minute), and whether Rust served it.
+#[derive(Debug, Clone, PartialEq)]
+struct Seen {
+    status: u16,
+    headers: Vec<String>,
+    body: String,
+    rust: bool,
+    /// The access token or session cookie value, when one was issued.
+    token: Option<String>,
+}
+
+async fn send(http: &reqwest::Client, url: String, h: &[(&str, String)], body: String) -> Seen {
+    let mut r = http.post(url).body(body);
+    for (k, v) in h {
+        r = r.header(*k, v);
+    }
+    let r = r.send().await.unwrap();
+    let status = r.status().as_u16();
+    let hv = |k: &str| {
+        r.headers()
+            .get_all(k)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let cookie = hv("set-cookie");
+    let mut token = cookie
+        .first()
+        .and_then(|c| Some(c.split_once('=')?.1.split(';').next()?.to_owned()));
+    let mut headers: Vec<String> = ["cache-control", "pragma", "www-authenticate"]
+        .iter()
+        .flat_map(|k| hv(k).into_iter().map(move |v| format!("{k}: {v}")))
+        .collect();
+    headers.extend(cookie.iter().map(|c| {
+        // The name hashes the state dir, so it differs between homes.
+        let rest = c.split_once('=').unwrap().1;
+        let attrs: Vec<&str> = rest
+            .split("; ")
+            .skip(1)
+            .filter(|a| !a.starts_with("Expires="))
+            .collect();
+        format!("set-cookie: <name>=<token>; {}", attrs.join("; "))
+    }));
+    let rust = r.headers().contains_key("x-vekrel-served-by");
+    let mut v: serde_json::Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    if let Some(o) = v.as_object_mut() {
+        for k in ["traceId", "expiresAt"] {
+            if o.contains_key(k) {
+                o.insert(k.into(), "<x>".into());
+            }
+        }
+        if let Some(t) = o.insert("access_token".into(), "<token>".into()) {
+            token = t.as_str().map(str::to_owned);
+        } else {
+            o.remove("access_token");
+        }
+        if let Some(n) = o.get("expires_in").and_then(|n| n.as_i64()) {
+            o.insert("expires_in".into(), ((n + 30) / 60).into());
+        }
+    }
+    Seen {
+        status,
+        headers,
+        body: v.to_string(),
+        rust,
+        token,
+    }
+}
+
+/// Both auth tables with ids, credentials, tokens and times normalised (session and link ids by
+/// first appearance; each timestamp as set/null plus the session and link TTLs in seconds) and
+/// `client_ip_address` as set/null (Rust stores the client's, Node the proxy's).
+fn normalised_tables(db: &rusqlite::Connection) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let mut ids: Vec<String> = Vec::new();
+    let mut id = |s: &str| {
+        let i = ids.iter().position(|x| x == s).unwrap_or_else(|| {
+            ids.push(s.to_owned());
+            ids.len() - 1
+        });
+        format!("<id{i}>")
+    };
+    let ms = |db: &rusqlite::Connection, a: &str, b: &str| -> i64 {
+        db.query_row(
+            "SELECT CAST(ROUND((unixepoch(?2, 'subsec') - unixepoch(?1, 'subsec'))) AS INTEGER)",
+            [a, b],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let set = |v: &Value| json!(if v.is_null() { "null" } else { "set" });
+    let mut sessions = vec![];
+    for mut r in dump_ordered(db, "auth_sessions") {
+        let o = r.as_object_mut().unwrap();
+        let ttl = ms(
+            db,
+            o["issued_at"].as_str().unwrap(),
+            o["expires_at"].as_str().unwrap(),
+        );
+        o.insert("ttl_s".into(), ttl.into());
+        o.insert(
+            "session_id".into(),
+            id(o["session_id"].as_str().unwrap()).into(),
+        );
+        for k in [
+            "issued_at",
+            "expires_at",
+            "revoked_at",
+            "last_connected_at",
+            "client_ip_address",
+        ] {
+            let v = set(&o[k]);
+            o.insert(k.into(), v);
+        }
+        sessions.push(r);
+    }
+    let mut links = vec![];
+    for mut r in dump_ordered(db, "auth_pairing_links") {
+        let o = r.as_object_mut().unwrap();
+        let ttl = ms(
+            db,
+            o["created_at"].as_str().unwrap(),
+            o["expires_at"].as_str().unwrap(),
+        );
+        o.insert("ttl_s".into(), ttl.into());
+        for k in ["id", "credential"] {
+            let v = id(o[k].as_str().unwrap());
+            o.insert(k.into(), v.into());
+        }
+        for k in ["created_at", "expires_at", "consumed_at", "revoked_at"] {
+            let v = set(&o[k]);
+            o.insert(k.into(), v);
+        }
+        links.push(r);
+    }
+    json!({"auth_sessions": sessions, "auth_pairing_links": links})
+}
+
+/// `dump` in insert order.
+fn dump_ordered(db: &rusqlite::Connection, table: &str) -> Vec<serde_json::Value> {
+    let mut q = db
+        .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+        .unwrap();
+    let names: Vec<String> = q.column_names().iter().map(|s| s.to_string()).collect();
+    q.query_map([], |r| {
+        let mut o = serde_json::Map::new();
+        for (i, n) in names.iter().enumerate() {
+            let v: Option<String> = r.get(i)?;
+            o.insert(n.clone(), serde_json::json!(v));
+        }
+        Ok(serde_json::Value::Object(o))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+fn token_form(cred: &str, extra: &[(&str, &str)]) -> String {
+    let mut f = url::form_urlencoded::Serializer::new(String::new());
+    f.append_pair(
+        "grant_type",
+        "urn:ietf:params:oauth:grant-type:token-exchange",
+    )
+    .append_pair("subject_token", cred)
+    .append_pair(
+        "subject_token_type",
+        "urn:t3:params:oauth:token-type:machine-bootstrap",
+    )
+    .append_pair(
+        "requested_token_type",
+        "urn:ietf:params:oauth:token-type:access_token",
+    );
+    f.extend_pairs(extra.iter().copied());
+    f.finish()
+}
+
+const FORM: &str = "application/x-www-form-urlencoded";
+const BROWSER_UA: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/141.0 Safari/537.36";
+
+/// The scripted pairing scenarios against one live home. `serve`: Rust answers (proofs sign the
+/// public URL); otherwise Node does (proofs sign the engine's URL, which Node behind the proxy
+/// checks). Returns each step's normalised response and the final normalised tables. With
+/// `watch`, a served `subscribeAuthAccess` watches the native bearer pairing.
+fn pairing_scenarios(
+    base: &str,
+    home: &Path,
+    startup: &str,
+    serve: bool,
+    watch: bool,
+) -> (Vec<(&'static str, Seen)>, serde_json::Value) {
+    use serde_json::{Value, json};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let htu_base = if serve {
+        base.to_owned()
+    } else {
+        format!("http://127.0.0.1:{}", engine_port(home))
+    };
+    let key = p256::ecdsa::SigningKey::from_slice(&[21; 32]).unwrap();
+    let mut steps: Vec<(&'static str, Seen)> = vec![];
+    let browser = |cred: &str, cookie: Option<&str>| {
+        let mut h = vec![
+            ("content-type", "application/json".to_owned()),
+            ("user-agent", BROWSER_UA.to_owned()),
+        ];
+        if let Some(c) = cookie {
+            h.push(("cookie", c.to_owned()));
+        }
+        let body = json!({ "credential": cred }).to_string();
+        rt.block_on(send(
+            &http,
+            format!("{base}/api/auth/browser-session"),
+            &h,
+            body,
+        ))
+    };
+    let token = |cred: &str, extra: &[(&str, &str)], proof: bool| {
+        let mut h = vec![
+            ("content-type", FORM.to_owned()),
+            ("user-agent", "vekrel-native/1.0".to_owned()),
+        ];
+        if proof {
+            h.push((
+                "dpop",
+                dpop_proof(&key, "POST", &format!("{htu_base}/oauth/token"), None),
+            ));
+        }
+        rt.block_on(send(
+            &http,
+            format!("{base}/oauth/token"),
+            &h,
+            token_form(cred, extra),
+        ))
+    };
+    let cookie_of = |s: &Seen, name: &str| format!("{name}={}", s.token.clone().unwrap());
+
+    // 1. Pair a browser with the startup token.
+    let owner = browser(startup, None);
+    assert_eq!(owner.status, 200, "{owner:?}");
+    let name = get(base, "", "/api/auth/session")["auth"]["sessionCookieName"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let owner_cookie = cookie_of(&owner, &name);
+    steps.push(("pair browser", owner));
+    // Links from Node's own route, plus a key-bound and an expired one as the cloud mint / time would leave them.
+    let link = |body: Value| {
+        post(
+            base,
+            &owner_cookie,
+            "/api/auth/pairing-token",
+            &body.to_string(),
+        )["credential"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let re = link(json!({"label": "Re-pair"}));
+    let bearer = link(json!({"scopes": ["orchestration:read", "filesystem:read"]}));
+    let dpop = link(json!({"label": "Phone", "scopes": ["orchestration:read"]}));
+    let narrow = link(json!({"scopes": ["orchestration:read"]}));
+    let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let thumb = {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+        use sha2::Digest;
+        let p = key.verifying_key().to_sec1_point(false);
+        let b = p.as_bytes();
+        let (x, y) = (B64.encode(&b[1..33]), B64.encode(&b[33..65]));
+        B64.encode(sha2::Sha256::digest(format!(
+            r#"{{"crv":"P-256","kty":"EC","x":"{x}","y":"{y}"}}"#
+        )))
+    };
+    db.execute(
+        "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, label, proof_key_thumbprint, created_at, expires_at)
+         VALUES ('bound-link', 'BOUNDCRED234', 'one-time-token', '[\"orchestration:read\"]', 'cloud-connect', NULL, ?1,
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+120 seconds')),
+                ('expired-link', 'EXPIRED23456', 'one-time-token', '[\"orchestration:read\"]', 'one-time-token', NULL, NULL,
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-300 seconds'))",
+        [&thumb],
+    )
+    .unwrap();
+
+    // 2. Re-pair a browser that already has a cookie: the old cookie session is replaced.
+    let s = browser(&re, Some(&owner_cookie));
+    let repaired = cookie_of(&s, &name);
+    steps.push(("re-pair browser (replace)", s));
+    // Watch the access stream (served by Rust) from the new browser session.
+    let mut ws = watch.then(|| {
+        let mut c = rt.block_on(auth_ws(&port, &repaired));
+        rt.block_on(subscribe_first_chunk(&mut c, 1));
+        c
+    });
+    // 3. A native client with a Bearer token (requested scopes: one granted, one not).
+    let s = token(
+        &bearer,
+        &[
+            ("scope", "filesystem:read orchestration:operate"),
+            ("client_label", "cli"),
+            ("client_device_type", "desktop"),
+            ("client_os", "Plan9"),
+        ],
+        false,
+    );
+    // Node's own stream can miss a write made right after it subscribes (its PubSub subscription
+    // races the snapshot), so only Rust's served stream is waited on.
+    if let Some(c) = ws.as_mut().filter(|_| serve) {
+        use futures_util::{SinkExt, StreamExt};
+        let sid = {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+            let t = s.token.clone().unwrap();
+            let claims: Value =
+                serde_json::from_slice(&B64.decode(t.split('.').next().unwrap()).unwrap()).unwrap();
+            claims["sid"].as_str().unwrap().to_owned()
+        };
+        let t0 = Instant::now();
+        let mut seen = (false, false);
+        let mut frames = vec![];
+        rt.block_on(async {
+            while !(seen.0 && seen.1) {
+                let Ok(m) = tokio::time::timeout(Duration::from_secs(10), c.next()).await else {
+                    panic!("serve={serve}: no stream event for {sid}; frames: {frames:?}")
+                };
+                let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) = m else {
+                    panic!("{m:?}")
+                };
+                let f: Value = serde_json::from_str(t.as_str()).unwrap();
+                frames.push(f.clone());
+                if f["_tag"] != "Chunk" {
+                    continue;
+                }
+                for e in f["values"].as_array().unwrap() {
+                    seen.0 |=
+                        e["type"] == "clientUpserted" && e["payload"]["sessionId"] == sid.as_str();
+                    seen.1 |= e["type"] == "pairingLinkRemoved";
+                }
+                c.send(tokio_tungstenite::tungstenite::Message::text(
+                    r#"{"_tag":"Ack","requestId":1}"#,
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        println!(
+            "subscribeAuthAccess (served by Rust) saw the Rust-written client and link removal after {:?}",
+            t0.elapsed()
+        );
+    }
+    steps.push(("native bearer", s));
+    // 4. A native client with DPoP, on an unbound and on a key-bound link.
+    steps.push(("native dpop", token(&dpop, &[], true)));
+    steps.push((
+        "bound link without proof",
+        token("BOUNDCRED234", &[], false),
+    ));
+    steps.push(("bound link with its key", token("BOUNDCRED234", &[], true)));
+    // 5. Invalid credential (no link: Node answers in both homes), reuse, expiry.
+    steps.push((
+        "invalid credential (browser)",
+        browser("NOPE23456789", None),
+    ));
+    steps.push((
+        "invalid credential (token)",
+        token("NOPE23456789", &[], false),
+    ));
+    steps.push(("consumed credential", token(&bearer, &[], false)));
+    steps.push(("expired credential", token("EXPIRED23456", &[], false)));
+    // 6. Scope not granted (the link stays usable), then a malformed scope.
+    steps.push((
+        "scope not granted",
+        token(&narrow, &[("scope", "access:read")], false),
+    ));
+    steps.push((
+        "invalid scope",
+        token(&narrow, &[("scope", "bad  scope")], false),
+    ));
+    drop(ws);
+    (steps, normalised_tables(&db))
+}
+
+/// (a) + (b): one home with Rust in shadow (Node writes, Rust dry-runs every request first) and
+/// one with Rust serving; the same scenarios give the same responses and, normalised, the same
+/// `auth_sessions` and `auth_pairing_links`.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn pairing_consume_db_diff_shadow_vs_serve() {
+    let Some((shadow_d, shadow_base, shadow_home, shadow_token)) = start_with(
+        "pair-shadow",
+        |home, _| {
+            let cfg = home.join("vekrel.toml");
+            let t = std::fs::read_to_string(&cfg).unwrap()
+                + "\"POST /api/auth/browser-session\" = \"shadow\"\n\"POST /oauth/token\" = \"shadow\"\n";
+            std::fs::write(&cfg, t).unwrap();
+        },
+    ) else {
+        return;
+    };
+    let (shadow_steps, shadow_tables) =
+        pairing_scenarios(&shadow_base, &shadow_home, &shadow_token, false, true);
+    std::thread::sleep(Duration::from_millis(500));
+    let l = log(&shadow_home);
+    let dry: Vec<&str> = l.lines().filter(|l| l.contains("rust dry run")).collect();
+    let resp: Vec<&str> = l
+        .lines()
+        .filter(|l| {
+            l.contains("rust shadow")
+                && (l.contains("browser-session") || l.contains("oauth/token"))
+        })
+        .collect();
+    let declines = l
+        .lines()
+        .filter(|l| l.contains("rust handler declined"))
+        .count();
+    println!(
+        "shadow: {} response comparisons, {} dry-run row checks, {declines} declines",
+        resp.len(),
+        dry.len()
+    );
+    for x in resp
+        .iter()
+        .chain(&dry)
+        .filter(|x| !x.contains("outcome=\"match\""))
+    {
+        println!("  {x}");
+    }
+    assert!(
+        dry.iter().all(|x| x.contains("outcome=\"match\"")),
+        "{dry:#?}"
+    );
+    // Node behind the proxy checks DPoP against its rewritten Host, so the client signs the
+    // engine's URL here and Rust (which checks the client's URL) predicts request_mismatch:
+    // exactly the two successful DPoP pairings. Everything else matches.
+    let mismatched: Vec<&&str> = resp
+        .iter()
+        .filter(|x| !x.contains("outcome=\"match\""))
+        .collect();
+    assert_eq!(mismatched.len(), 2, "{mismatched:#?}");
+    assert!(
+        mismatched
+            .iter()
+            .all(|x| x.contains("oauth/token") && x.contains("field=\"status\""))
+    );
+    // The two invalid credentials have no link: declined, Node answers.
+    assert_eq!(declines, 2, "{l}");
+    drop(shadow_d);
+
+    let Some((serve_d, serve_base, serve_home, serve_token)) = start_with(
+        "pair-serve",
+        |home, _| {
+            let cfg = home.join("vekrel.toml");
+            let t = std::fs::read_to_string(&cfg).unwrap()
+                + "\"POST /api/auth/browser-session\" = \"serve\"\n\"POST /oauth/token\" = \"serve\"\n\"subscribeAuthAccess\" = \"serve\"\n";
+            std::fs::write(&cfg, t).unwrap();
+        },
+    ) else {
+        return;
+    };
+    let (serve_steps, serve_tables) =
+        pairing_scenarios(&serve_base, &serve_home, &serve_token, true, true);
+    for ((name, a), (_, b)) in shadow_steps.iter().zip(&serve_steps) {
+        println!(
+            "{name}: node {} / rust {} served_by_rust={}",
+            a.status, b.status, b.rust
+        );
+        assert_eq!(
+            (a.status, &a.headers, &a.body),
+            (b.status, &b.headers, &b.body),
+            "{name}"
+        );
+        assert!(!a.rust);
+        assert_eq!(b.rust, !name.starts_with("invalid credential"), "{name}");
+    }
+    let (a, b) = (
+        serde_json::to_string_pretty(&shadow_tables).unwrap(),
+        serde_json::to_string_pretty(&serve_tables).unwrap(),
+    );
+    println!("normalised tables (identical in both homes):\n{b}");
+    assert_eq!(a, b, "DB diff");
+    // Rust stores the client's own address; through loopback that is 127.0.0.1 as well.
+    drop(serve_d);
+    assert!(!shadow_home.exists() && !serve_home.exists());
+}
+
+/// (c) Review Focus 2: the same credential at Rust (public port) and Node (engine port) at once,
+/// 20 times: exactly one success each time, one session per link.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn pairing_consume_race_rust_vs_node() {
+    let Some((d, base, home, token)) = start_with("pair-race", |home, _| {
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap()
+            + "\"POST /api/auth/browser-session\" = \"serve\"\n\"POST /oauth/token\" = \"serve\"\n";
+        std::fs::write(&cfg, t).unwrap();
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let internal = format!("http://127.0.0.1:{}", engine_port(&home));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = reqwest::Client::new();
+    let h = [("content-type", FORM.to_owned())];
+    let (mut rust_wins, mut node_wins) = (0, 0);
+    for i in 0..20u64 {
+        let cred = post(
+            &base,
+            &cookie,
+            "/api/auth/pairing-token",
+            &format!(r#"{{"label":"race {i}"}}"#),
+        )["credential"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // Sweep the start offset from Rust 2 ms late to Node 2 ms late.
+        let (rust_delay, node_delay) = (200 * 10u64.saturating_sub(i), 200 * i.saturating_sub(10));
+        let at = |url: String, delay: u64| {
+            let (http, h, body) = (&http, &h, token_form(&cred, &[]));
+            async move {
+                tokio::time::sleep(Duration::from_micros(delay)).await;
+                send(http, url, h, body).await
+            }
+        };
+        let (a, b) = rt.block_on(async {
+            tokio::join!(
+                at(format!("{base}/oauth/token"), rust_delay),
+                at(format!("{internal}/oauth/token"), node_delay),
+            )
+        });
+        let ok = [a.status, b.status];
+        assert_eq!(
+            ok.iter().filter(|s| **s == 200).count(),
+            1,
+            "round {i}: {a:?} {b:?}"
+        );
+        assert!(ok.contains(&401), "round {i}: {ok:?}");
+        if a.status == 200 {
+            assert!(a.rust);
+            rust_wins += 1;
+        } else {
+            node_wins += 1;
+        }
+    }
+    let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
+    let per_link: i64 = db
+        .query_row(
+            "SELECT count(*) FROM auth_sessions WHERE client_label LIKE 'race %' GROUP BY client_label HAVING count(*) <> 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let total: i64 = db
+        .query_row(
+            "SELECT count(*) FROM auth_sessions WHERE client_label LIKE 'race %'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    println!(
+        "race: 20 rounds, exactly one success each (rust {rust_wins}, node {node_wins}); {total} sessions"
+    );
+    assert_eq!((per_link, total), (0, 20));
+    drop(d);
+    assert!(!home.exists());
+}

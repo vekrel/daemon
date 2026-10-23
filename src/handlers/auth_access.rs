@@ -44,14 +44,6 @@ pub(crate) const SCOPES: [&str; 17] = [
     "relay:write",
 ];
 
-/// Secrets a cloud link leaves (`cloud/config.ts`): the relay or the managed tunnel can then
-/// carry sockets straight to Node.
-const CLOUD_SECRETS: [&str; 3] = [
-    "cloud-endpoint-runtime-config.bin",
-    "cloud-relay-machine-credential.bin",
-    "cloud-relay-url.bin",
-];
-
 pub struct AuthAccess {
     inputs: Arc<Inputs>,
     poll: Duration,
@@ -79,24 +71,19 @@ impl AuthAccess {
     }
 }
 
+impl AuthAccess {
+    /// Why Node's own `subscribeAuthAccess` may be serving some client (`auth::bypass::active`):
+    /// then only Node's writes reach that stream, so Rust's auth writes must decline.
+    pub fn bypass(&self) -> Option<&'static str> {
+        self.inputs.bypass()
+    }
+}
+
 impl Inputs {
     /// Why some socket may be invisible to the registry, if one may be. Checked at subscribe and
     /// on every wake of a live stream (which then hands the request to Node).
     fn bypass(&self) -> Option<&'static str> {
-        if self.tailscale {
-            return Some("tailscale_serve");
-        }
-        let Some(secrets) = self.files.secrets_dir() else {
-            return Some("no_secrets_dir");
-        };
-        // `exists` is false on a read error too, so an unreadable dir also declines below.
-        if std::fs::read_dir(secrets).is_err() {
-            return Some("secrets_unreadable");
-        }
-        if CLOUD_SECRETS.iter().any(|f| secrets.join(f).exists()) {
-            return Some("cloud_link");
-        }
-        (self.registry.unattributed() > 0).then_some("unverified_socket")
+        crate::auth::bypass::active(&self.files, &self.registry, self.tailscale)
     }
 }
 

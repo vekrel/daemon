@@ -78,6 +78,11 @@ pub trait RouteHandler: Send + Sync {
     fn compare(&self) -> Compare {
         Compare::DEFAULT
     }
+    /// The handler writes in `serve`, so `shadow` is a dry run: its prediction (SELECTs only) must
+    /// read the DB before Node writes it, and the proxy waits for it before forwarding.
+    fn dry_run(&self) -> bool {
+        false
+    }
     /// `None` means "not mine": Node answers, in either mode.
     fn handle<'a>(
         &'a self,
@@ -85,6 +90,12 @@ pub trait RouteHandler: Send + Sync {
         ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Response<Bytes>>>;
 }
+
+/// On a dry run's predicted response: checks Node's real write against the prediction, given
+/// Node's headers and body (blocking: it reads the DB). `None` when they agree, else what differs.
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+pub struct DryRun(pub Arc<dyn Fn(&axum::http::HeaderMap, &[u8]) -> Option<String> + Send + Sync>);
 
 /// The config key for a handler: `"GET /api/auth/session"`.
 pub fn key(h: &dyn RouteHandler) -> String {
@@ -465,7 +476,20 @@ pub(crate) fn tee(
             tracing::info!(route, outcome = "skipped_encoding", "rust shadow");
             return;
         };
-        match diff(&cmp, status, &headers, &bytes, &rust) {
+        let d = diff(&cmp, status, &headers, &bytes, &rust);
+        if let Some(DryRun(check)) = rust.extensions().get::<DryRun>().cloned()
+            && status == rust.status()
+        {
+            let (route, headers, bytes) = (route.clone(), headers.clone(), bytes.clone());
+            match tokio::task::spawn_blocking(move || check(&headers, &bytes)).await {
+                Ok(None) => tracing::info!(route, outcome = "match", "rust dry run"),
+                Ok(Some(field)) => {
+                    tracing::warn!(route, outcome = "mismatch", field, "rust dry run")
+                }
+                Err(_) => {}
+            }
+        }
+        match d {
             None => tracing::info!(route, outcome = "match", "rust shadow"),
             // Expected while Node sits behind the proxy: not a Rust bug.
             Some((field, path)) if htu => {
