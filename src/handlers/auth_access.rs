@@ -75,7 +75,8 @@ impl AuthAccess {
     /// Why Node's own `subscribeAuthAccess` may be serving some client (`auth::bypass::active`):
     /// then only Node's writes reach that stream, so Rust's auth writes must decline.
     pub fn bypass(&self) -> Option<&'static str> {
-        self.inputs.bypass()
+        let i = &self.inputs;
+        crate::auth::bypass::active(&i.files, &i.registry, i.tailscale)
     }
 
     pub(crate) fn registry(&self) -> &Arc<Registry> {
@@ -87,7 +88,7 @@ impl Inputs {
     /// Why some socket may be invisible to the registry, if one may be. Checked at subscribe and
     /// on every wake of a live stream (which then hands the request to Node).
     fn bypass(&self) -> Option<&'static str> {
-        crate::auth::bypass::active(&self.files, &self.registry, self.tailscale)
+        crate::auth::bypass::sockets(&self.files, &self.registry, self.tailscale)
     }
 }
 

@@ -503,6 +503,11 @@ mod tests {
         let u = reg.open(None);
         assert!(list(&e, &reg, &cookie).await.is_none());
         drop(u);
+        // A socket whose access stream Node serves: the list stays Node's too, like the writes.
+        let held = reg.node_stream();
+        assert!(list(&e, &reg, &cookie).await.is_none());
+        drop(held);
+        assert!(list(&e, &reg, &cookie).await.is_some());
         std::fs::write(e.0.path().join("cloud-relay-url.bin"), "x").unwrap();
         assert!(list(&e, &reg, &cookie).await.is_none());
     }
@@ -618,6 +623,11 @@ mod tests {
         assert!(call(writer(&e, &reg, true)).await.is_none());
         assert!(revoked(&e).iter().all(|r| !r.1) && !a.close.is_cancelled());
         std::fs::remove_file(&cloud).unwrap();
+        // A socket whose access stream Node took is still open: Node still writes.
+        let held = reg.node_stream();
+        assert!(call(writer(&e, &reg, true)).await.is_none());
+        assert!(revoked(&e).iter().all(|r| !r.1) && !a.close.is_cancelled());
+        drop(held);
         let r = call(writer(&e, &reg, true)).await.unwrap();
         assert_eq!(text(r), r#"{"revoked":true}"#);
         assert!(a.close.is_cancelled());

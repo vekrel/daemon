@@ -4,7 +4,7 @@
 //! Routing follows research section 4: frames Rust does not own are forwarded as the original
 //! bytes, and the proxy's pump is the only writer to the client socket.
 use crate::{
-    auth::registry::Registry,
+    auth::registry::{NodeStream, Registry},
     config::{Mode, RustConfig},
     handlers::{
         HandlerCtx, VerifiedSession,
@@ -329,6 +329,7 @@ struct Owned {
     ack: Option<UnboundedSender<()>>,
     /// Chunks sent and not yet acked; Acks beyond these are dropped.
     unacked: u32,
+    tag: &'static str,
 }
 
 /// Per-connection routing state. Keys are the request id's JSON text.
@@ -339,6 +340,8 @@ pub(crate) struct Conn {
     shadow: HashMap<String, Shadowed>,
     done: UnboundedSender<Done>,
     limit: ShadowLimit,
+    /// Set once Node serves this socket's `subscribeAuthAccess`; dropped with the socket.
+    node_stream: Option<NodeStream>,
 }
 
 impl Drop for Conn {
@@ -366,6 +369,7 @@ impl Conn {
             shadow: HashMap::new(),
             done,
             limit,
+            node_stream: None,
         }
     }
 
@@ -471,7 +475,7 @@ impl Conn {
                 };
                 // An array element is re-encoded, like the remainder of a split array frame.
                 let raw = raw.map_or_else(|| m.to_string(), str::to_owned);
-                let (done, id) = (self.done.clone(), id.clone());
+                let (done, id, tag) = (self.done.clone(), id.clone(), h.tag());
                 let ack = match h {
                     Handler::Unary(h) => {
                         let task = tokio::spawn(self.run(h, payload, s, cancel.clone(), "serve"));
@@ -495,6 +499,7 @@ impl Conn {
                     raw,
                     ack,
                     unacked: 0,
+                    tag,
                 };
                 self.owned.insert(key, o);
                 true
@@ -594,7 +599,13 @@ impl Conn {
         if let Some(o) = self.owned.remove(&d.key) {
             return Some(match d.exit {
                 Some(e) => Out::Client(exit_frame(&d.id, &e)),
-                None => Out::Node(o.raw),
+                None => {
+                    if o.tag == "subscribeAuthAccess" {
+                        let reg = &self.seam.registry;
+                        self.node_stream.get_or_insert_with(|| reg.node_stream());
+                    }
+                    Out::Node(o.raw)
+                }
             });
         }
         match d.exit {

@@ -20,6 +20,8 @@ struct Inner {
     sessions: HashMap<String, Vec<(u64, CancellationToken)>>,
     /// Sockets Node accepted whose session Rust could not verify: their `connected` is unknown.
     unattributed: usize,
+    /// Open sockets whose `subscribeAuthAccess` Node serves (see `NodeStream`).
+    node_streams: usize,
 }
 
 impl Default for Registry {
@@ -56,6 +58,16 @@ impl Drop for Entry {
         }
         drop(i);
         self.reg.changed.send_replace(());
+    }
+}
+
+/// Held by a socket whose `subscribeAuthAccess` went to Node (declined or handed off): Node's
+/// in-memory stream never sees Rust's writes, so writers decline until the socket closes.
+pub struct NodeStream(Arc<Registry>);
+
+impl Drop for NodeStream {
+    fn drop(&mut self) {
+        self.0.lock().node_streams -= 1;
     }
 }
 
@@ -100,6 +112,17 @@ impl Registry {
     /// Open sockets whose session is unknown to Rust.
     pub fn unattributed(&self) -> usize {
         self.lock().unattributed
+    }
+
+    /// Marks one socket's access stream as Node's until the guard drops.
+    pub fn node_stream(self: &Arc<Self>) -> NodeStream {
+        self.lock().node_streams += 1;
+        NodeStream(self.clone())
+    }
+
+    /// Open sockets whose access stream Node serves.
+    pub fn node_streams(&self) -> usize {
+        self.lock().node_streams
     }
 
     /// Closes every socket of `sid`; returns how many.

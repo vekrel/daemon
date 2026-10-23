@@ -263,6 +263,7 @@ struct Rig {
     ev: UnboundedReceiver<String>,
     proxy: u16,
     tap: Arc<Tap>,
+    state: Arc<State>,
 }
 
 async fn rig(seam: Seam) -> Rig {
@@ -275,8 +276,9 @@ async fn rig_with(seam: Seam, limit: ShadowLimit) -> Rig {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy = l.local_addr().unwrap().port();
     let tap = Arc::new(Tap::default());
+    let state = Arc::new(State::default());
     let app = server::build_with_tap(
-        Arc::new(State::default()),
+        state.clone(),
         server::Upstream::loopback(up)
             .with_public_port(proxy)
             .with_rpc_seam(seam)
@@ -291,7 +293,12 @@ async fn rig_with(seam: Seam, limit: ShadowLimit) -> Rig {
         .await
         .unwrap()
     });
-    Rig { ev, proxy, tap }
+    Rig {
+        ev,
+        proxy,
+        tap,
+        state,
+    }
 }
 
 fn seam(mode: Mode, echo: Arc<Echo>, auth: Option<Arc<AuthSession>>) -> Seam {
@@ -1518,4 +1525,58 @@ async fn auth_access_hands_off_to_node_when_a_bypass_appears_mid_stream() {
     assert_eq!(next_ev(&mut r).await, format!("text:{}", ack(1)));
     assert!(reg.unattributed() >= 1);
     assert_eq!(logs.lines("auth_access_handoff").len(), 1);
+    // The cause clears, but Node still serves this socket's stream: writers keep declining.
+    drop(_u);
+    until(|| reg.unattributed() == 0).await;
+    assert_eq!(reg.node_streams(), 1);
+    c.close(None).await.unwrap();
+    until(|| reg.node_streams() == 0).await;
+}
+
+async fn until(f: impl Fn() -> bool) {
+    for _ in 0..300 {
+        if f() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(f(), "condition never held");
+}
+
+#[tokio::test]
+async fn a_node_owned_access_stream_is_counted_until_its_socket_closes_on_every_path() {
+    for path in ["client", "session", "engine_lost", "restart", "shutdown"] {
+        let (dir, files, _w) = access_env();
+        let s = access_seam(Mode::Serve, &files);
+        let reg = s.registry().clone();
+        let mut r = rig(s).await;
+        // Declined at subscribe (a cloud link), so Node serves this socket's stream.
+        let cloud = dir.path().join("cloud-relay-url.bin");
+        std::fs::write(&cloud, b"https://relay").unwrap();
+        let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+        let req = request(1, "subscribeAuthAccess", json!({}));
+        send(&mut c, &req).await;
+        assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
+        std::fs::remove_file(&cloud).unwrap();
+        until(|| reg.node_streams() == 1).await;
+        // A second subscribe on the socket: Rust serves it (its stream reads the DB, so it sees
+        // Node's writes) and the socket still counts once.
+        send(&mut c, &request(2, "subscribeAuthAccess", json!({}))).await;
+        let got = [recv(&mut c).await, recv(&mut c).await];
+        assert!(
+            got.iter()
+                .any(|f| f.contains(r#""requestId":2"#) && f.contains("snapshot")),
+            "{got:?}"
+        );
+        assert_eq!(reg.node_streams(), 1, "{path}");
+        match path {
+            "client" => c.close(None).await.unwrap(),
+            "session" => assert_eq!(reg.close_session(SID), 1),
+            // The fake engine drops its socket on any non-text frame.
+            "engine_lost" => c.send(Message::binary(vec![0u8])).await.unwrap(),
+            "restart" => r.state.bump_generation(),
+            _ => r.state.shutdown(),
+        }
+        until(|| reg.node_streams() == 0).await;
+    }
 }

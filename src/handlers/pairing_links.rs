@@ -96,6 +96,7 @@ pub(crate) fn now_ms() -> Option<i64> {
 
 /// What a writer needs besides the session: whether its route is configured `serve` (and the
 /// proxy says so too), and whether Node's own stream may have clients.
+#[derive(Clone)]
 pub struct Writer {
     pub auth: Arc<AuthSession>,
     /// Asked only for its bypass check.
@@ -830,7 +831,13 @@ mod tests {
         // Shadow predictions write nothing either.
         assert!(create(&e, &cookie, "{}", false).await.is_some());
         std::fs::remove_file(&cloud).unwrap();
-        assert_eq!(create(&e, &cookie, "{}", true).await.unwrap().status(), 200);
+        // A socket whose access stream Node took is still open: Node still writes.
+        let w = writer(&e, true);
+        let held = w.access.registry().node_stream();
+        assert!(make(w.clone(), &cookie, true).await.is_none());
+        assert_eq!(rows(&e).len(), 1);
+        drop(held);
+        assert_eq!(make(w, &cookie, true).await.unwrap().status(), 200);
         assert_eq!(
             revoke(&e, &cookie, "open", true).await.unwrap().status(),
             200

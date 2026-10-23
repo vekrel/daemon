@@ -12,9 +12,17 @@ const CLOUD_SECRETS: [&str; 3] = [
     "cloud-relay-url.bin",
 ];
 
+/// Why Rust's auth writes (and the clients list) must stay Node's: a possible bypass (`sockets`),
+/// or an open socket whose `subscribeAuthAccess` Node serves, which never sees Rust's writes.
+pub fn active(files: &AuthFiles, registry: &Registry, tailscale: bool) -> Option<&'static str> {
+    sockets(files, registry, tailscale)
+        .or_else(|| (registry.node_streams() > 0).then_some("node_stream"))
+}
+
 /// Why, if a bypass may exist: Tailscale Serve (it proxies to Node's own port), no or an
 /// unreadable secrets dir, a cloud link, or an open `/ws` whose session Rust could not verify.
-pub fn active(files: &AuthFiles, registry: &Registry, tailscale: bool) -> Option<&'static str> {
+/// Rust's own stream checks only this: it reads the DB, so it sees Node's writes too.
+pub fn sockets(files: &AuthFiles, registry: &Registry, tailscale: bool) -> Option<&'static str> {
     if tailscale {
         return Some("tailscale_serve");
     }

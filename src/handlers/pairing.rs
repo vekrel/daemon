@@ -1742,16 +1742,48 @@ mod tests {
                 .status(),
             200
         );
-        // Gone: Rust serves again.
+        // The link is gone, but a socket whose access stream Node took is still open: that
+        // stream never sees Rust's writes, so Node still writes.
         std::fs::remove_file(e.0.path().join("cloud-relay-url.bin")).unwrap();
-        assert_eq!(
-            browser(&e, &[], r#"{"credential":"LIVE"}"#, true)
-                .await
-                .unwrap()
-                .status(),
-            200
-        );
+        let w = writer(&e, true);
+        let held = w.access.registry().node_stream();
+        let call = |w: Writer| {
+            let h = [("content-type", "application/json")];
+            let p = request(
+                "/api/auth/browser-session",
+                &h,
+                r#"{"credential":"LIVE"}"#,
+                true,
+            );
+            async move { BrowserSession(w).handle(&p, &HandlerCtx::default()).await }
+        };
+        assert!(call(w.clone()).await.is_none());
+        assert!(!consumed(&e, "LIVE"));
+        // Only once that socket closes does Rust serve again.
+        drop(held);
+        assert_eq!(call(w).await.unwrap().status(), 200);
         assert!(consumed(&e, "LIVE"));
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_on_a_locked_db_gives_up_at_once() {
+        let e = home();
+        link(&e, "LIVE", r#"["orchestration:read"]"#, None, None, FUTURE);
+        let lock = db(&e);
+        lock.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+        let t = std::time::Instant::now();
+        assert!(
+            browser(&e, &[], r#"{"credential":"LIVE"}"#, false)
+                .await
+                .is_none()
+        );
+        // Far under Node's 5 s busy_timeout, which the dry run must not wait out.
+        assert!(
+            t.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            t.elapsed()
+        );
+        lock.execute_batch("ROLLBACK").unwrap();
     }
 
     #[tokio::test]

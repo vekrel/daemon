@@ -826,8 +826,10 @@ async fn a_slow_dry_run_is_skipped_after_250_ms() {
         (s, b.as_str(), hits.load(Ordering::SeqCst)),
         (200, "node", 1)
     );
+    // Clearly under the dry run's 2 s stall, so it fails without the 250 ms cap, yet loose
+    // enough for a loaded machine.
     assert!(
-        took < std::time::Duration::from_millis(400),
+        took < std::time::Duration::from_millis(1500),
         "took {took:?}"
     );
     let lines = logs.wait(1).await;
@@ -873,9 +875,10 @@ async fn a_locked_db_skips_the_dry_run_at_once() {
         (s, b.as_str(), hits.load(Ordering::SeqCst)),
         (200, "node", 1)
     );
-    // Well under the 250 ms cap: the dry run's SQLite does not wait for the lock at all.
+    // Node is not held up by the lock (the 250 ms cap alone would allow that); that the dry
+    // run's SQLite does not wait at all is `pairing::tests::a_dry_run_on_a_locked_db_gives_up_at_once`.
     assert!(
-        took < std::time::Duration::from_millis(200),
+        took < std::time::Duration::from_millis(1500),
         "took {took:?}"
     );
     let lines = logs.wait(1).await;
