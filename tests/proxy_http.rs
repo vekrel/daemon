@@ -270,6 +270,52 @@ async fn forwarded_host_omitted_for_wrong_port() {
     forwarded_host_seen_with_client_host(|_| "127.0.0.1:1".into()).await;
 }
 
+/// Node signs a link proof only for a request that reached it unproxied (`linkChecks.ts`
+/// `hasForwardedAuthorityHeaders`, `isAllowedEndpointOrigin` on the Host port), so the daemon
+/// adds and rewrites nothing on that route; whatever the client sent is Node's to judge.
+#[tokio::test]
+async fn link_proof_passes_through_as_the_client_sent_it() {
+    let (up, seen) = header_probe().await;
+    let base = proxy(up).await;
+    reqwest::Client::new()
+        .post(format!("{base}/api/connect/link-proof?x=1"))
+        .send()
+        .await
+        .unwrap();
+    let h = seen.lock().await.clone();
+    assert_eq!(h["host"], base.trim_start_matches("http://"));
+    for name in [
+        "x-vekrel-proxy",
+        "x-forwarded-proto",
+        "x-forwarded-host",
+        "x-forwarded-for",
+    ] {
+        assert!(h.get(name).is_none(), "{name} added");
+    }
+    // Client-sent ones stay, so Node refuses them exactly as it would directly.
+    reqwest::Client::new()
+        .post(format!("{base}/api/connect/link-proof"))
+        .header("x-forwarded-proto", "https")
+        .header("x-forwarded-for", "10.0.0.9")
+        .send()
+        .await
+        .unwrap();
+    let h = seen.lock().await.clone();
+    assert_eq!(h["x-forwarded-proto"], "https");
+    assert_eq!(h["x-forwarded-for"], "10.0.0.9");
+    assert!(h.get("x-vekrel-proxy").is_none());
+    // Neighbouring routes keep the usual rewrite.
+    reqwest::Client::new()
+        .post(format!("{base}/api/connect/relay-config"))
+        .send()
+        .await
+        .unwrap();
+    let h = seen.lock().await.clone();
+    assert_eq!(h["host"], format!("127.0.0.1:{up}"));
+    assert_eq!(h["x-vekrel-proxy"], "1");
+    assert_eq!(h["x-forwarded-proto"], "http");
+}
+
 #[tokio::test]
 async fn asterisk_form_request_gets_400() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

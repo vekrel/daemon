@@ -82,6 +82,12 @@ pub(crate) fn add_forwarded(
     };
 }
 
+/// Node signs a link proof only for a request that reached it unproxied: no `x-forwarded-host`
+/// or `-proto`, and a Host whose port is the origin the client claims (`cloud/linkChecks.ts`).
+/// So this route reaches Node with the client's own Host and nothing added; the bind is
+/// loopback-only, and any forwarded header the client sent is Node's to refuse.
+const LINK_PROOF: &str = "/api/connect/link-proof";
+
 pub(crate) fn error(status: StatusCode, code: &str) -> Response {
     Response::builder()
         .status(status)
@@ -117,14 +123,17 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
             )
         })
         .flatten();
+    let unproxied = req.uri().path() == LINK_PROOF;
     let h = req.headers_mut();
     let client_host = h.get(header::HOST).cloned();
     strip_hop_by_hop(h);
-    h.insert(
-        header::HOST,
-        HeaderValue::from_str(&authority).expect("valid host"),
-    );
-    add_forwarded(h, client_host, upstream.public_port, ip);
+    if !unproxied {
+        h.insert(
+            header::HOST,
+            HeaderValue::from_str(&authority).expect("valid host"),
+        );
+        add_forwarded(h, client_host, upstream.public_port, ip);
+    }
 
     // Handlers see the request exactly as Node would (rewritten Host, X-Forwarded-*).
     let path = req.uri().path().to_owned();

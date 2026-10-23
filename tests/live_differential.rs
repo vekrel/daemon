@@ -2938,3 +2938,63 @@ fn clients_shadow_matches_and_serve_revokes_like_node() {
     drop((db_a, db_b, da, db));
     assert!(!home_a.exists() && !home_b.exists());
 }
+
+/// `POST /api/connect/link-proof` as the web client sends it (`linkMachine.ts`: the origin port
+/// is the port it talks to) → (status, JWT header + payload with per-call values masked, or the
+/// raw body).
+fn link_proof(base: &str, cookie: &str) -> (u16, serde_json::Value) {
+    use base64::Engine as _;
+    let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+    let body = serde_json::json!({
+        "challenge": "live-test-challenge",
+        "relayIssuer": "https://relay.invalid",
+        "endpoint": {
+            "httpBaseUrl": "http://127.0.0.1:1",
+            "wsBaseUrl": "ws://127.0.0.1:1",
+            "providerKind": "manual"
+        },
+        "origin": { "localHttpHost": "127.0.0.1", "localHttpPort": port }
+    });
+    let (code, out) = curl(&[
+        "-X",
+        "POST",
+        "-H",
+        &format!("cookie: {cookie}"),
+        "-H",
+        "content-type: application/json",
+        "-d",
+        &body.to_string(),
+        &format!("{base}/api/connect/link-proof"),
+    ]);
+    let Ok(serde_json::Value::String(jwt)) = serde_json::from_str(&out) else {
+        return (code, serde_json::Value::String(out));
+    };
+    let part = |i: usize| -> serde_json::Value {
+        let b = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(jwt.split('.').nth(i).unwrap())
+            .unwrap();
+        serde_json::from_slice(&b).unwrap()
+    };
+    let mut payload = part(1);
+    for k in ["jti", "iat", "exp"] {
+        payload[k] = "<masked>".into();
+    }
+    payload["origin"]["localHttpPort"] = "<port>".into();
+    (
+        code,
+        serde_json::json!({ "header": part(0), "payload": payload }),
+    )
+}
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn link_proof_through_daemon_matches_direct() {
+    let Some((_d, base, home, token)) = start("link-proof") else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let direct = link_proof(&engine_base(&home), &cookie);
+    let proxied = link_proof(&base, &cookie);
+    assert_eq!(direct.0, 200, "direct: {}", direct.1);
+    assert_eq!(proxied, direct);
+}
