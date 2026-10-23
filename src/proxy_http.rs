@@ -10,6 +10,9 @@ use std::{
     time::Duration,
 };
 
+/// The longest a dry-run prediction may hold up the request on its way to Node.
+const DRY_RUN_WAIT: Duration = Duration::from_millis(250);
+
 const HOP_BY_HOP: [&str; 6] = [
     "connection",
     "keep-alive",
@@ -174,7 +177,7 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         }
         _ => false,
     };
-    // Shadow: Rust runs beside Node and never delays Node's answer.
+    // Shadow: Rust runs beside Node and never delays Node's answer, except a dry run (below).
     let (seam, rust_parts, route, cmp) = (
         upstream.seam.clone(),
         parts.clone(),
@@ -186,10 +189,16 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         &route,
         async move { h.handle(&rust_parts, &seam.ctx).await },
     );
-    // A dry run predicts from the DB as it is before Node's write.
-    if dry_run && let Some(j) = rust.take() {
-        let r = j.await.ok().flatten();
-        rust = Some(tokio::spawn(std::future::ready(r)));
+    // A dry run predicts from the DB as it is before Node's write, so Node waits for it, but at
+    // most `DRY_RUN_WAIT`: then the comparison is skipped.
+    if dry_run && let Some(mut j) = rust.take() {
+        match tokio::time::timeout(DRY_RUN_WAIT, &mut j).await {
+            Ok(r) => rust = Some(tokio::spawn(std::future::ready(r.ok().flatten()))),
+            Err(_) => {
+                j.abort();
+                tracing::info!(route, outcome = "shadow_skipped_busy", "rust shadow");
+            }
+        }
     }
     let node = forward(&upstream, Request::from_parts(parts, body)).await;
     match rust {

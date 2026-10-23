@@ -278,6 +278,14 @@ struct Link {
     expires_at: String,
 }
 
+/// SQLite could not take its lock without waiting.
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
 fn link_by_credential(c: &Connection, credential: &str) -> rusqlite::Result<Option<Link>> {
     c.query_row(
         "SELECT method, scopes, subject, label, proof_key_thumbprint,
@@ -355,12 +363,19 @@ fn consume(
     let mut c =
         Connection::open_with_flags(files.db_path(), flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .ok()?;
-    // Node's own busy_timeout: wait out its writes as it waits out ours.
-    c.busy_timeout(Duration::from_secs(5)).ok()?;
+    // Serve: Node's own busy_timeout, waiting out its writes as it waits out ours. A dry run
+    // holds up Node's answer, so it never waits: busy means no comparison.
+    let busy = if ctx.serve { 5000 } else { 0 };
+    c.busy_timeout(Duration::from_millis(busy)).ok()?;
     let now_iso = iso_millis(now);
     // Only a credential with a one-time link row is Rust's (seeded desktop grants, the rotating
     // desktop token and the dev token have none).
-    let Some(link) = link_by_credential(&c, &a.credential).ok()? else {
+    let link = match link_by_credential(&c, &a.credential) {
+        Ok(l) => l,
+        Err(e) if !ctx.serve && is_busy(&e) => return Some(Err("shadow_skipped_busy")),
+        Err(_) => return None,
+    };
+    let Some(link) = link else {
         return Some(Err("not_a_pairing_link"));
     };
     if link.method != "one-time-token" {
@@ -442,7 +457,9 @@ fn consume(
             return Some(Ok(explain(Some(&link), a, &now_iso)));
         };
         let scopes = granted(&link.scopes, a);
-        if scopes.is_empty() {
+        // `exchangeBootstrapCredentialForAccessToken` rejects no scopes after the consume;
+        // `createBrowserSession` issues a session with none.
+        if scopes.is_empty() && !a.browser {
             return Some(Ok(Outcome::ScopeNotGranted));
         }
         let replaced = match &replace {
@@ -480,7 +497,7 @@ fn consume(
             return Ok(explain(again.as_ref(), a, &now_iso));
         };
         let scopes = granted(&link.scopes, a);
-        if scopes.is_empty() {
+        if scopes.is_empty() && !a.browser {
             // Node's consume has committed by now too.
             tx.commit()?;
             return Ok(Outcome::ScopeNotGranted);
@@ -595,26 +612,38 @@ async fn run(
     let files = auth.files().clone();
     let a = Arc::new(a);
     let (f, a2, c2, acc) = (files.clone(), a.clone(), ctx.clone(), access.clone());
-    let out = match tokio::task::spawn_blocking(move || {
+    let joined = tokio::task::spawn_blocking(move || {
         // Before any write (the DPoP marker included).
         match acc.bypass().filter(|_| c2.serve) {
             Some(why) => Some(Err(why)),
             None => consume(&f, &a2, &c2, now),
         }
     })
-    .await
-    .ok()?
-    {
-        None => return declined(route, "unreadable"),
-        Some(Err(why)) => return declined(route, why),
-        Some(Ok(o)) => o,
-    };
-    let browser = a.browser;
-    let issued = if browser {
+    .await;
+    let issued = if a.browser {
         "browser_session_issuance_failed"
     } else {
         "access_token_issuance_failed"
     };
+    let out = match joined {
+        // A panic may have come after a write: serve must answer, as Node would.
+        Err(_) if ctx.serve => {
+            let r = http_errors::internal_error(issued);
+            return Some(if a.browser { r } else { no_store(r) });
+        }
+        Err(_) => return None,
+        Ok(o) => o,
+    };
+    let out = match out {
+        None => return declined(route, "unreadable"),
+        Some(Err("shadow_skipped_busy")) => {
+            tracing::info!(route, outcome = "shadow_skipped_busy", "rust shadow");
+            return None;
+        }
+        Some(Err(why)) => return declined(route, why),
+        Some(Ok(o)) => o,
+    };
+    let browser = a.browser;
     // Node's browser-session sets no-store only on success; /oauth/token before the exchange.
     let errors = |r| if browser { r } else { no_store(r) };
     let (token, row, replaced, link_id) = match out {
@@ -641,7 +670,7 @@ async fn run(
         }
         Outcome::Failed => return Some(errors(http_errors::internal_error(issued))),
     };
-    let after = now_ms()?;
+    let after = now_ms().unwrap_or(now);
     let expires_in = ((row.expires_ms - after) / 1000).max(0);
     let mut r = if browser {
         let body = BrowserResult {
@@ -1688,6 +1717,31 @@ mod tests {
             200
         );
         assert!(consumed(&e, "LIVE"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_scope_link_is_nodes_answer_per_route() {
+        let e = home();
+        link(&e, "EMPTY1", "[]", None, None, FUTURE);
+        link(&e, "EMPTY2", "[]", None, None, FUTURE);
+        // `createBrowserSession` issues a session with no scopes.
+        let predicted = browser(&e, &[], r#"{"credential":"EMPTY1"}"#, false)
+            .await
+            .unwrap();
+        let r = browser(&e, &[], r#"{"credential":"EMPTY1"}"#, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            (predicted.status(), r.status()),
+            (StatusCode::OK, StatusCode::OK)
+        );
+        assert!(text(&r).starts_with(r#"{"authenticated":true,"scopes":[],"permissions":[],"#));
+        assert!(consumed(&e, "EMPTY1"));
+        // The token exchange consumes, then answers scope_not_granted (as Node's separate steps do).
+        let r = token(&e, None, &form("EMPTY2", &[]), true).await.unwrap();
+        assert_eq!(r.status(), 400);
+        assert!(text(&r).contains(r#""reason":"scope_not_granted""#));
+        assert!(consumed(&e, "EMPTY2"));
     }
 
     #[tokio::test]

@@ -2508,13 +2508,18 @@ fn pairing_consume_race_rust_vs_node() {
             "round {i}: {a:?} {b:?}"
         );
         assert!(ok.contains(&401), "round {i}: {ok:?}");
+        // Rust answers its request either way (win or 401), never declines it to Node.
+        assert!(a.rust, "round {i}: Rust declined");
         if a.status == 200 {
-            assert!(a.rust);
             rust_wins += 1;
         } else {
             node_wins += 1;
         }
     }
+    assert!(
+        rust_wins > 0 && node_wins > 0,
+        "rust {rust_wins}, node {node_wins}"
+    );
     let db = rusqlite::Connection::open(home.join("userdata/statev2.sqlite")).unwrap();
     let per_link: i64 = db
         .query_row(

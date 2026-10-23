@@ -779,3 +779,105 @@ async fn unsure_tickets_defer_to_node() {
     std::fs::remove_file(e.dir.join("secrets/server-signing-key.bin")).unwrap();
     assert_eq!(ws(&e, &q(&t)).await, WsSession::Deferred, "key gone");
 }
+
+// ---- dry runs (pairing writers): the prediction never holds Node's answer up for long ----
+
+/// A dry-run handler for `POST /api/auth/browser-session` that takes 2 s to predict.
+struct SlowDryRun;
+impl RouteHandler for SlowDryRun {
+    fn method_path(&self) -> (axum::http::Method, &'static str) {
+        (axum::http::Method::POST, "/api/auth/browser-session")
+    }
+    fn dry_run(&self) -> bool {
+        true
+    }
+    fn handle<'a>(
+        &'a self,
+        _: &'a axum::http::request::Parts,
+        _: &'a HandlerCtx,
+    ) -> futures_util::future::BoxFuture<'a, Option<Response<axum::body::Bytes>>> {
+        Box::pin(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            None
+        })
+    }
+}
+
+async fn post_timed(url: &str, body: &str) -> (u16, String, std::time::Duration) {
+    let t = std::time::Instant::now();
+    let r = reqwest::Client::new()
+        .post(url.replace("/api/auth/session", "/api/auth/browser-session"))
+        .header("content-type", "application/json")
+        .body(body.to_owned())
+        .send()
+        .await
+        .unwrap();
+    let s = r.status().as_u16();
+    (s, r.text().await.unwrap(), t.elapsed())
+}
+
+#[tokio::test]
+async fn a_slow_dry_run_is_skipped_after_250_ms() {
+    let (logs, _g) = capture();
+    let (up, hits) = engine(200, "node".into()).await;
+    let url = proxy_with(up, Mode::Shadow, Arc::new(SlowDryRun)).await;
+    let (s, b, took) = post_timed(&url, r#"{"credential":"X"}"#).await;
+    assert_eq!(
+        (s, b.as_str(), hits.load(Ordering::SeqCst)),
+        (200, "node", 1)
+    );
+    assert!(
+        took < std::time::Duration::from_millis(400),
+        "took {took:?}"
+    );
+    let lines = logs.wait(1).await;
+    assert!(
+        lines.iter().any(|l| l.contains("shadow_skipped_busy")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_locked_db_skips_the_dry_run_at_once() {
+    use vekrel::{
+        auth::registry::Registry,
+        handlers::{auth_access::AuthAccess, pairing::BrowserSession},
+    };
+    let (logs, _g) = capture();
+    let e = Env::ok("dry-run-locked");
+    let db = rusqlite::Connection::open(e.dir.join("statev2.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE auth_pairing_links (id TEXT PRIMARY KEY, credential TEXT NOT NULL UNIQUE,
+           method TEXT NOT NULL, scopes TEXT NOT NULL, subject TEXT NOT NULL, label TEXT,
+           created_at TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT, revoked_at TEXT,
+           proof_key_thumbprint TEXT);
+         INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at)
+           VALUES ('l', 'CRED', 'one-time-token', '[]', 'one-time-token', 'x', '2099-01-01T00:00:00.000Z');
+         BEGIN EXCLUSIVE;",
+    )
+    .unwrap();
+    let access = Arc::new(AuthAccess::new(
+        e.files.clone(),
+        Arc::new(Registry::default()),
+        false,
+    ));
+    let h = Arc::new(BrowserSession(Arc::new(e.handler()), access));
+    let (up, hits) = engine(200, "node".into()).await;
+    let url = proxy_with(up, Mode::Shadow, h).await;
+    let (s, b, took) = post_timed(&url, r#"{"credential":"CRED"}"#).await;
+    assert_eq!(
+        (s, b.as_str(), hits.load(Ordering::SeqCst)),
+        (200, "node", 1)
+    );
+    // Well under the 250 ms cap: the dry run's SQLite does not wait for the lock at all.
+    assert!(
+        took < std::time::Duration::from_millis(200),
+        "took {took:?}"
+    );
+    let lines = logs.wait(1).await;
+    assert!(
+        lines.iter().any(|l| l.contains("shadow_skipped_busy")),
+        "{lines:?}"
+    );
+    db.execute_batch("ROLLBACK").unwrap();
+}
