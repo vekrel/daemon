@@ -49,8 +49,8 @@ impl RouteHandler for Shell {
             headers: &["content-type", "vary", "access-control-allow-origin"],
             enrich: &["$.projects[*].repositoryIdentity"],
             skew: &["snapshotSequence"],
-            // The owner's shell is a few MB.
-            tee_limit: 64 << 20,
+            // About 5x the owner's 1.43 MB shell; beyond it `shadow_skipped_large`.
+            tee_limit: 8 << 20,
             ..Compare::DEFAULT
         }
     }

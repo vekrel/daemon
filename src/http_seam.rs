@@ -13,7 +13,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{
-    sync::{Semaphore, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     task::JoinHandle,
 };
 
@@ -46,20 +46,39 @@ impl ShadowLimit {
         handler: &str,
         fut: impl Future<Output = Option<T>> + Send + 'static,
     ) -> Option<JoinHandle<Option<T>>> {
-        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
-            tracing::info!(handler, outcome = "shadow_skipped_busy", "rust shadow");
-            return None;
-        };
-        let (timeout, handler) = (self.timeout, handler.to_owned());
-        Some(tokio::spawn(async move {
+        let permit = self.acquire(handler)?;
+        let fut = async move {
             let _permit = permit;
+            fut.await
+        };
+        Some(self.run(handler, fut))
+    }
+
+    /// A permit, or `None` (logged as `shadow_skipped_busy`) when every permit is taken. The
+    /// caller holds it for as long as the shadow work keeps memory (HTTP: through the compare).
+    pub fn acquire(&self, handler: &str) -> Option<OwnedSemaphorePermit> {
+        let p = self.permits.clone().try_acquire_owned().ok();
+        if p.is_none() {
+            tracing::info!(handler, outcome = "shadow_skipped_busy", "rust shadow");
+        }
+        p
+    }
+
+    /// Spawns `fut` under the timeout (`None` on timeout); the permit is the caller's.
+    pub fn run<T: Send + 'static>(
+        &self,
+        handler: &str,
+        fut: impl Future<Output = Option<T>> + Send + 'static,
+    ) -> JoinHandle<Option<T>> {
+        let (timeout, handler) = (self.timeout, handler.to_owned());
+        tokio::spawn(async move {
             tokio::time::timeout(timeout, fut)
                 .await
                 .unwrap_or_else(|_| {
                     tracing::warn!(handler, outcome = "shadow_timeout", "rust shadow");
                     None
                 })
-        }))
+        })
     }
 }
 
@@ -499,17 +518,26 @@ pub(crate) fn tee(
     cmp: Compare,
     // Node rejects a DPoP proof only for the rewritten Host (see `dpop::node_htu_host_mismatch`).
     htu: bool,
+    // Held until the compare is done: it bounds the bodies and JSON trees shadows keep in memory.
+    permit: OwnedSemaphorePermit,
 ) -> Response<Body> {
     let (parts, body) = node.into_parts();
     // shortcut: a body without a known length (chunked) is skipped too; Node sends lengths for JSON.
     if body.size_hint().upper().is_none_or(|n| n > cmp.tee_limit) {
         let (status, len) = (parts.status.as_u16(), body.size_hint().upper());
-        tracing::info!(route, status, len, outcome = "skipped_large", "rust shadow");
+        tracing::info!(
+            route,
+            status,
+            len,
+            outcome = "shadow_skipped_large",
+            "rust shadow"
+        );
         return Response::from_parts(parts, body);
     }
     let (tx, rx) = oneshot::channel();
     let (status, headers) = (parts.status, parts.headers.clone());
     tokio::spawn(async move {
+        let _permit = permit;
         // A handler that declines, panics, or a body that failed / was abandoned: nothing to compare.
         let (Ok(Some(rust)), Ok(bytes)) = (rust.await, rx.await) else {
             return;
@@ -1100,6 +1128,104 @@ mod tests {
             assert_eq!(parse_http_date(&utc_string(ms)), Some(ms - ms % 1000));
         }
         assert_eq!(parse_iso("2026-10-23T08:00:00Z"), None);
+    }
+
+    /// Node's response whose body arrives only when `tx` sends (or closes), like a large or slow
+    /// upstream body; `len` bytes declared.
+    fn held_node(len: usize) -> (tokio::sync::mpsc::Sender<Bytes>, Response<Body>) {
+        /// A body with a known length (as hyper gives Node's) whose bytes come from a channel.
+        struct Held(tokio::sync::mpsc::Receiver<Bytes>, u64);
+        impl HttpBody for Held {
+            type Data = Bytes;
+            type Error = std::io::Error;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<http_body::Frame<Bytes>, std::io::Error>>> {
+                self.0
+                    .poll_recv(cx)
+                    .map(|b| b.map(|b| Ok(http_body::Frame::data(b))))
+            }
+            fn size_hint(&self) -> http_body::SizeHint {
+                http_body::SizeHint::with_exact(self.1)
+            }
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+        let r = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::new(Held(rx, len as u64)))
+            .unwrap();
+        (tx, r)
+    }
+
+    #[tokio::test]
+    async fn http_shadow_permits_cover_the_compare_and_never_delay_the_client() {
+        let all = |b: Body| axum::body::to_bytes(b, usize::MAX);
+        let l = ShadowLimit::new(2, Duration::from_secs(10));
+        let ct = ("content-type", "application/json");
+        let mut held = Vec::new();
+        let mut skipped = 0;
+        // 5 concurrent shadowed requests, 2 permits: Rust answers at once, Node's bodies are open.
+        for _ in 0..5 {
+            let Some(permit) = l.acquire("r") else {
+                skipped += 1;
+                continue;
+            };
+            let job = l.run("r", async move { Some(rust(200, &[ct], "[1]")) });
+            let (tx, node) = held_node(3);
+            held.push((
+                tx,
+                tee(node, job, "r".into(), Compare::DEFAULT, false, permit),
+            ));
+        }
+        assert_eq!((held.len(), skipped), (2, 3));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Rust's handlers are done; the compares still wait on Node's bodies and hold the permits.
+        assert_eq!(l.permits.available_permits(), 0);
+        for (tx, r) in held {
+            tx.send(Bytes::from_static(b"[1]")).await.unwrap();
+            drop(tx);
+            assert_eq!(&all(r.into_body()).await.unwrap()[..], b"[1]");
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while l.permits.available_permits() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "compares never released"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Rust still computing: Node's body reaches the client at once.
+        let permit = l.acquire("slow").unwrap();
+        let job = l.run("slow", std::future::pending::<Option<Response<Bytes>>>());
+        let (tx, node) = held_node(3);
+        let r = tee(node, job, "slow".into(), Compare::DEFAULT, false, permit);
+        tx.send(Bytes::from_static(b"[2]")).await.unwrap();
+        drop(tx);
+        let body = tokio::time::timeout(Duration::from_secs(1), all(r.into_body()))
+            .await
+            .expect("not delayed by Rust");
+        assert_eq!(&body.unwrap()[..], b"[2]");
+        assert_eq!(
+            l.permits.available_permits(),
+            1,
+            "held until Rust ends (its timeout)"
+        );
+
+        // Over the route's cap: passed through, compare skipped, the permit released at once.
+        let permit = l.acquire("big").unwrap();
+        let job = l.run("big", async move { Some(rust(200, &[ct], "[3]")) });
+        let (tx, node) = held_node(11);
+        let small = Compare {
+            tee_limit: 10,
+            ..Compare::DEFAULT
+        };
+        let r = tee(node, job, "big".into(), small, false, permit);
+        assert_eq!(l.permits.available_permits(), 1);
+        tx.send(Bytes::from_static(b"[333333333]")).await.unwrap();
+        drop(tx);
+        assert_eq!(all(r.into_body()).await.unwrap().len(), 11);
     }
 
     #[tokio::test]

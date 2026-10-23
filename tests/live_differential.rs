@@ -4773,7 +4773,7 @@ fn route_outcomes(home: &Path, route: &str) -> std::collections::BTreeMap<String
                 o = ENRICHED;
             }
             // Effect's chunked 400 for a missing protocol header, which Rust declines anyway.
-            if o == "skipped_large" && l.contains("status=400") {
+            if o == "shadow_skipped_large" && l.contains("status=400") {
                 o = "skipped_400";
             }
             *m.entry(o.to_owned()).or_default() += 1;

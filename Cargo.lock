@@ -2537,6 +2537,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hmac",
+ "http-body",
  "hyper-util",
  "icu_collator",
  "libc",

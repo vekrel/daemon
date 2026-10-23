@@ -555,7 +555,7 @@ async fn shadow_compares_http_bytes() {
     let url = proxy(up, Mode::Shadow, desc(), e.files.clone()).await;
     assert_eq!(get(&url, &[]).await.2.len(), big.len());
     let lines = logs.wait(4).await;
-    assert!(lines[3].contains("skipped_large"), "{lines:?}");
+    assert!(lines[3].contains("shadow_skipped_large"), "{lines:?}");
 }
 
 #[tokio::test]

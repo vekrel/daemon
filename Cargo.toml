@@ -39,3 +39,5 @@ replay = []
 vekrel = { path = ".", features = ["replay"] }
 reqwest = { version = "0.13.5", features = ["json"] }
 tempfile = "3"
+# Already in the tree through hyper; the shadow tests build a body with a known length.
+http-body = "1"

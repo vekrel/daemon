@@ -209,10 +209,13 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         h.compare(),
     );
     let dry_run = h.dry_run();
-    let mut rust = upstream.shadow.spawn(
-        &route,
-        async move { h.handle(&rust_parts, &seam.ctx).await },
-    );
+    let permit = upstream.shadow.acquire(&route);
+    let mut rust = permit.as_ref().map(|_| {
+        upstream.shadow.run(
+            &route,
+            async move { h.handle(&rust_parts, &seam.ctx).await },
+        )
+    });
     // A dry run predicts from the DB as it is before Node's write, so Node waits for it, but at
     // most `DRY_RUN_WAIT`: then the comparison is skipped.
     if dry_run && let Some(mut j) = rust.take() {
@@ -225,9 +228,9 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         }
     }
     let node = forward(&upstream, Request::from_parts(parts, body)).await;
-    match rust {
-        Some(rust) => http_seam::tee(node, rust, route, cmp, htu),
-        None => node,
+    match (rust, permit) {
+        (Some(rust), Some(permit)) => http_seam::tee(node, rust, route, cmp, htu, permit),
+        _ => node,
     }
 }
 
