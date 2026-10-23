@@ -117,6 +117,9 @@ fn browse(home: Option<&str>, payload: &Value) -> Option<Value> {
 }
 
 impl UnaryHandler for Browse {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
     fn tag(&self) -> &'static str {
         "filesystem.browse"
     }
@@ -169,21 +172,9 @@ fn normalize(p: &str) -> String {
     format!("/{}", out.join("/"))
 }
 
-/// `String.prototype.trim`: WhiteSpace and LineTerminator (not U+0085, unlike `char::is_whitespace`).
+/// `String.prototype.trim`.
 fn js_trim(s: &str) -> &str {
-    s.trim_matches(|c| {
-        matches!(
-            c,
-            '\t' | '\n' | '\u{B}' | '\u{C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
-                ..='\u{200A}'
-                    | '\u{2028}'
-                    | '\u{2029}'
-                    | '\u{202F}'
-                    | '\u{205F}'
-                    | '\u{3000}'
-                    | '\u{FEFF}'
-        )
-    })
+    s.trim_matches(crate::machine::is_js_space)
 }
 
 /// Code points where ICU4X's root collation was checked to order exactly like Node 26 / ICU 78

@@ -32,10 +32,12 @@ use tokio_tungstenite::{
 };
 use vekrel::{
     auth::shadow::AuthFiles,
-    config::Mode,
+    config::{Mode, RustConfig},
     handlers::{
         HandlerCtx,
         auth_session::{AuthSession, Descriptor},
+        browse::Browse,
+        read_file::ReadFile,
     },
     http_seam::ShadowLimit,
     proxy_ws::{Dir, FrameTap},
@@ -118,7 +120,8 @@ fn auth(e: &Env) -> Arc<AuthSession> {
 
 /// `test.echo` (`filesystem:read`): answers its payload (or `payload.value`); `{"fail":..}`
 /// fails with it; `{"wait":true}` waits for cancellation; `{"sleep":true}` ignores the token and
-/// sleeps 5 s (`dropped` is set when the seam drops it); `{"decline":true}` declines (Node answers).
+/// sleeps 5 s (`dropped` is set when the seam drops it); `{"decline":true}` declines (Node answers);
+/// `{"panic":true}` panics.
 #[derive(Default)]
 struct Echo {
     started: Arc<AtomicBool>,
@@ -177,6 +180,9 @@ impl UnaryHandler for Echo {
             }
             if let Some(v) = payload.get("value") {
                 return Some(Ok(v.clone()));
+            }
+            if payload.get("panic").is_some() {
+                panic!("echo asked to panic");
             }
             if payload.get("decline").is_some() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -399,38 +405,68 @@ async fn serve_answers_locally_and_upstream_never_sees_request() {
     assert_eq!(conn_of(Dir::S2c, &want), Some(c2s), "{tap:?}");
 }
 
-#[tokio::test]
-async fn serve_without_verified_session_returns_authorization_error() {
-    let e = env("nosession", r#"["filesystem:read"]"#);
-    let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
-    // No credential at all (Node may still accept the socket, e.g. a dev cookie).
-    let mut c = connect(r.proxy, "", &[]).await;
-    send(&mut c, &request(1, "test.echo", json!({}))).await;
-    assert_eq!(recv(&mut c).await, exit(1, AUTH_ERROR));
-    // A forged signature.
-    let bad = cookie(&["filesystem:read"]).replace('.', ".AAAA");
-    let mut c = connect(r.proxy, "", &[("cookie", bad)]).await;
-    send(&mut c, &request(2, "test.echo", json!({}))).await;
-    assert_eq!(recv(&mut c).await, exit(2, AUTH_ERROR));
-    assert!(r.ev.try_recv().is_err(), "never falls back to Node");
-
-    // Key/DB unavailable.
-    let gone = env("gone", "[]");
-    std::fs::remove_file(gone.dir.join("key.bin")).unwrap();
-    let r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&gone)))).await;
-    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
-    send(&mut c, &request(3, "test.echo", json!({}))).await;
-    assert_eq!(recv(&mut c).await, exit(3, AUTH_ERROR));
-
-    // No verifier configured (engine config Rust cannot reproduce).
-    let r = rig(seam(Mode::Serve, Arc::default(), None)).await;
-    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
-    send(&mut c, &request(4, "test.echo", json!({}))).await;
-    assert_eq!(recv(&mut c).await, exit(4, AUTH_ERROR));
+/// Sends a request on a fresh socket and asserts Node, not Rust, answers it.
+async fn assert_node_answers(
+    r: &mut Rig,
+    query: &str,
+    headers: &[(&'static str, String)],
+    id: u64,
+) {
+    let mut c = connect(r.proxy, query, headers).await;
+    let req = request(id, "test.echo", json!({"node":"from node"}));
+    send(&mut c, &req).await;
+    assert_eq!(next_ev(r).await, format!("text:{req}"));
+    assert_eq!(
+        recv(&mut c).await,
+        exit(id, r#"{"_tag":"Success","value":"from node"}"#)
+    );
 }
 
 #[tokio::test]
-async fn serve_with_session_missing_scope_returns_authorization_error() {
+async fn serve_with_unverifiable_session_defers_to_node() {
+    // Node accepted each of these sockets, so a session Rust cannot verify is Rust's blind spot.
+    let (logs, _g) = Logs::capture();
+    let e = env("nosession", r#"["filesystem:read"]"#);
+    let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
+    // No credential at all (Node never accepts that upgrade, so Rust's view is incomplete).
+    assert_node_answers(&mut r, "", &[], 1).await;
+    // A signature Rust cannot verify (e.g. the key changed since Node checked it).
+    let bad = cookie(&["filesystem:read"]).replace('.', ".AAAA");
+    assert_node_answers(&mut r, "", &[("cookie", bad)], 2).await;
+
+    // Key file missing.
+    let gone = env("gone", "[]");
+    std::fs::remove_file(gone.dir.join("key.bin")).unwrap();
+    let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&gone)))).await;
+    assert_node_answers(&mut r, "", &[("cookie", cookie(&["filesystem:read"]))], 3).await;
+    assert_eq!(logs.lines("deferred_unverifiable_credential").len(), 3);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_with_unreadable_key_file_defers_to_node() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env("unreadable", r#"["filesystem:read"]"#);
+    let key = e.dir.join("key.bin");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&key).is_ok() {
+        eprintln!("running as root: the key stays readable; skipping");
+        return;
+    }
+    let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
+    assert_node_answers(&mut r, "", &[("cookie", cookie(&["filesystem:read"]))], 1).await;
+}
+
+#[tokio::test]
+async fn serve_with_unsupported_engine_config_defers_to_node() {
+    // `main` attaches no verifier when `unsupported_engine` names a flag (--mode, --host, dev auth,
+    // bootstrap fd), a non-UTF-8 home or a state dir it cannot resolve.
+    let mut r = rig(seam(Mode::Serve, Arc::default(), None)).await;
+    assert_node_answers(&mut r, "", &[("cookie", cookie(&["filesystem:read"]))], 1).await;
+}
+
+#[tokio::test]
+async fn serve_with_verified_session_missing_scope_returns_authorization_error() {
     // Node checks the TOKEN's scopes, exact string match: the row's scopes don't count and
     // `orchestration:read` (filesystem:read's legacy parent) does not grant it.
     let e = env("scope", r#"["orchestration:read","filesystem:read"]"#);
@@ -853,4 +889,92 @@ async fn shadow_decline_logs_declined_without_comparing() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("outcome=\"declined\""), "{lines:?}");
     assert!(lines[0].contains("mode=\"shadow\""), "{lines:?}");
+}
+
+#[tokio::test]
+async fn serve_panic_forwards_the_request_to_node() {
+    let e = env("panic", "[]");
+    let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    let req = request(1, "test.echo", json!({"panic":true,"node":"from node"}));
+    send(&mut c, &req).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{req}"));
+    assert_eq!(
+        recv(&mut c).await,
+        exit(1, r#"{"_tag":"Success","value":"from node"}"#)
+    );
+}
+
+#[tokio::test]
+async fn handler_without_config_entry_runs_in_shadow() {
+    let (logs, _g) = Logs::capture();
+    let e = env("default-mode", "[]");
+    let h: Arc<dyn UnaryHandler> = Arc::new(Echo::default());
+    assert_eq!(h.default_mode(), Mode::Shadow);
+    // The proven handlers opt in to serve.
+    assert_eq!(ReadFile.default_mode(), Mode::Serve);
+    assert_eq!(Browse::from_env().default_mode(), Mode::Serve);
+    let mut r = rig(Seam::from_config(vec![h], &RustConfig::default()).with_auth(auth(&e))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    let req = request(1, "test.echo", json!({"a":1}));
+    send(&mut c, &req).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{req}"), "Node answers");
+    assert_eq!(
+        recv(&mut c).await,
+        exit(1, r#"{"_tag":"Success","value":{"a":1}}"#)
+    );
+    barrier(&mut r, &mut c, 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let lines = logs.lines("rust shadow");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("outcome=\"match\""), "{lines:?}");
+
+    // A config entry still overrides the default.
+    let cfg: RustConfig = toml::from_str("[handlers]\n\"test.echo\" = \"serve\"\n").unwrap();
+    let h: Arc<dyn UnaryHandler> = Arc::new(Echo::default());
+    let mut r = rig(Seam::from_config(vec![h], &cfg).with_auth(auth(&e))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    send(&mut c, &request(1, "test.echo", json!(7))).await;
+    assert_eq!(
+        recv(&mut c).await,
+        exit(1, r#"{"_tag":"Success","value":7}"#)
+    );
+    barrier(&mut r, &mut c, 2).await;
+}
+
+#[tokio::test]
+async fn spaced_frames_are_still_routed_and_pings_pass_through() {
+    let e = env("spaced", "[]");
+    let echo = Arc::new(Echo::default());
+    let mut r = rig(seam(Mode::Serve, echo.clone(), Some(auth(&e)))).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
+    // Whitespace around `:` and an escaped tag still reach the handler.
+    for (id, f) in [
+        (
+            1,
+            r#"{ "_tag" : "Request" , "id" : 1, "tag": "test.echo", "payload": 1, "headers": [] }"#,
+        ),
+        (
+            2,
+            r#"{"_tag":"Requ\u0065st","id":2,"tag":"test.echo","payload":2,"headers":[]}"#,
+        ),
+    ] {
+        send(&mut c, f).await;
+        assert_eq!(
+            recv(&mut c).await,
+            exit(id, &format!(r#"{{"_tag":"Success","value":{id}}}"#))
+        );
+    }
+    send(
+        &mut c,
+        r#"{"_tag":"Request","id":3,"tag":"test.echo","payload":{"wait":true},"headers":[]}"#,
+    )
+    .await;
+    echo.started().await;
+    send(&mut c, r#"{ "_tag" : "Interrupt", "requestId" : 3 }"#).await;
+    assert!(recv(&mut c).await.contains(r#""requestId":3"#));
+    let ping = r#"{"_tag":"Ping"}"#;
+    send(&mut c, ping).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{ping}"));
+    barrier(&mut r, &mut c, 4).await;
 }

@@ -38,16 +38,16 @@ pub enum Mode {
     /// Node answers; Rust is not consulted.
     Off,
     /// Node answers; Rust computes its answer too and logs whether they match.
+    #[default]
     Shadow,
     /// Rust answers; Node never sees the request.
-    #[default]
     Serve,
 }
 
 impl RustConfig {
-    /// Every handler defaults to `serve`.
-    pub fn mode(&self, key: &str) -> Mode {
-        self.handlers.get(key).copied().unwrap_or_default()
+    /// The configured mode for `key`, else the handler's own `default`.
+    pub fn mode(&self, key: &str, default: Mode) -> Mode {
+        self.handlers.get(key).copied().unwrap_or(default)
     }
 }
 
@@ -103,21 +103,20 @@ mod tests {
     }
 
     #[test]
-    fn handler_modes_default_to_serve() {
+    fn handler_modes_default_to_the_handlers_choice() {
         let c = parse("[server]\nport = 1\n[engine]\ncommand = \"x\"\n");
-        for k in [
-            "GET /.well-known/vekrel/machine",
-            "GET /api/auth/session",
-            "projects.readFile",
-            "filesystem.browse",
-        ] {
-            assert_eq!(c.rust.mode(k), Mode::Serve);
-        }
+        assert_eq!(c.rust.mode("projects.readFile", Mode::Serve), Mode::Serve);
+        assert_eq!(c.rust.mode("new.tag", Mode::Shadow), Mode::Shadow);
+        assert_eq!(Mode::default(), Mode::Shadow, "never serve by accident");
         let c = parse(
-            "[server]\nport = 1\n[engine]\ncommand = \"x\"\n[rust.handlers]\n\"GET /api/auth/session\" = \"shadow\"\n\"x\" = \"off\"\n",
+            "[server]\nport = 1\n[engine]\ncommand = \"x\"\n[rust.handlers]\n\"GET /api/auth/session\" = \"shadow\"\n\"x\" = \"off\"\n\"y\" = \"serve\"\n",
         );
-        assert_eq!(c.rust.mode("GET /api/auth/session"), Mode::Shadow);
-        assert_eq!(c.rust.mode("x"), Mode::Off);
+        assert_eq!(
+            c.rust.mode("GET /api/auth/session", Mode::Serve),
+            Mode::Shadow
+        );
+        assert_eq!(c.rust.mode("x", Mode::Serve), Mode::Off);
+        assert_eq!(c.rust.mode("y", Mode::Shadow), Mode::Serve);
         assert!(
             toml::from_str::<Config>(
                 "[server]\nport = 1\n[engine]\ncommand = \"x\"\n[rust.handlers]\na = \"on\"\n"

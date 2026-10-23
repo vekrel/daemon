@@ -334,6 +334,9 @@ pub fn probe_host(platform: &str, cwd: &Path) -> Option<Facts> {
 }
 
 impl RouteHandler for MachineDescriptor {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
     fn method_path(&self) -> (Method, &'static str) {
         (Method::GET, "/.well-known/vekrel/machine")
     }

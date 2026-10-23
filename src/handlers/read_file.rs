@@ -15,6 +15,9 @@ const PATH_MAX_LENGTH: usize = 512;
 pub struct ReadFile;
 
 impl UnaryHandler for ReadFile {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
     fn tag(&self) -> &'static str {
         "projects.readFile"
     }

@@ -94,6 +94,9 @@ impl AuthSession {
 }
 
 impl RouteHandler for AuthSession {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
     fn method_path(&self) -> (Method, &'static str) {
         (Method::GET, "/api/auth/session")
     }
@@ -173,8 +176,8 @@ impl AuthSession {
     }
 
     /// The session Node's `authenticateWebSocketUpgrade` derives, given the headers and query
-    /// Node sees on the proxied upgrade. Node already accepted the socket, so a credential it
-    /// would reject means Rust's view is wrong: `Unverified`, which denies.
+    /// Node sees on the proxied upgrade. Node already accepted the socket (it rejects upgrades
+    /// without a valid credential), so anything Rust cannot verify is Rust's blind spot: `Deferred`.
     pub async fn ws_session(&self, h: &HeaderMap, query: Option<&str>) -> WsSession {
         // shortcut: any `wsTicket` key (or a %/+-encoded key that might decode to it) defers, even
         // when Node would ignore an empty one; deferring is always safe.
@@ -191,12 +194,12 @@ impl AuthSession {
             return WsSession::Deferred;
         }
         let Some(Cred::Token { token, dpop }) = self.credential(h) else {
-            return WsSession::Unverified;
+            return WsSession::Deferred;
         };
         let files = self.files.clone();
         match tokio::task::spawn_blocking(move || verify(&files, &token, dpop.as_deref())).await {
             Ok(Some(Some(v))) => WsSession::Verified(v),
-            _ => WsSession::Unverified,
+            _ => WsSession::Deferred,
         }
     }
 
@@ -278,10 +281,10 @@ pub struct VerifiedSession {
 /// A WS connection's session, from the upgrade request's credentials.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WsSession {
+    /// Rust checks each RPC's scope against it; a missing scope is `MachineAuthorizationError`.
     Verified(VerifiedSession),
-    /// No credential, a credential Node would reject, or key/DB unreadable: Rust denies.
-    Unverified,
-    /// A `wsTicket` or a DPoP proof: only Node can verify these, so Node answers.
+    /// Rust cannot evaluate the session Node accepted (`wsTicket`, DPoP, no or rejected
+    /// credential, key/DB unreadable, engine config Rust cannot reproduce): Node answers.
     Deferred,
 }
 

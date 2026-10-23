@@ -62,19 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let state = Arc::new(supervisor::State::default());
     let mut seam = Seam::default();
-    // WS handlers (Tasks 5/6) go here; each tag's mode comes from `[rust.handlers]`.
+    // Each tag's mode comes from `[rust.handlers]`, else the handler's `default_mode`.
     let ws_handlers: Vec<Arc<dyn UnaryHandler>> = vec![
         Arc::new(read_file::ReadFile),
         Arc::new(browse::Browse::from_env()),
     ];
-    let ws_handlers = ws_handlers
-        .into_iter()
-        .map(|h| {
-            let mode = cfg.rust.mode(h.tag());
-            (h, mode)
-        })
-        .collect();
-    let mut rpc = rpc_seam::Seam::new(ws_handlers);
+    let mut rpc = rpc_seam::Seam::from_config(ws_handlers, &cfg.rust);
     if let Some((userdata, files)) = &auth_files {
         let ctx = HandlerCtx {
             cwd: std::env::current_dir()?,
@@ -96,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let desc = auth_session::Descriptor::web("127.0.0.1", engine_port, dir, "");
                 let auth = Arc::new(auth_session::AuthSession::new(desc, files.clone()));
                 let h: Arc<dyn RouteHandler> = auth.clone();
-                let mode = cfg.rust.mode(&http_seam::key(&*h));
+                let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
                 seam = seam.with(mode, h);
                 // Without it (unsupported engine config) WS sessions are unverified: serve denies.
                 rpc = rpc.with_auth(auth);
@@ -108,7 +101,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::warn!("GET /.well-known/vekrel/machine handler disabled: {why}")
             }
             // Off: no warmer either, so no probes run.
-            Ok(()) if cfg.rust.mode("GET /.well-known/vekrel/machine") == config::Mode::Off => {}
+            Ok(())
+                if cfg.rust.handlers.get("GET /.well-known/vekrel/machine")
+                    == Some(&config::Mode::Off) => {}
             Ok(()) => {
                 let h: Arc<dyn RouteHandler> =
                     Arc::new(machine_descriptor::MachineDescriptor::start(
@@ -116,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         seam.ctx.clone(),
                         Arc::new(machine_descriptor::probe_host),
                     ));
-                let mode = cfg.rust.mode(&http_seam::key(&*h));
+                let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
                 seam = seam.with(mode, h);
             }
         }

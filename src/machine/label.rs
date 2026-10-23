@@ -161,4 +161,32 @@ mod tests {
         assert_eq!(l, "win-host");
         assert!(calls.is_empty());
     }
+
+    #[test]
+    fn labels_trim_like_js_string_trim() {
+        // JS `trim` strips U+FEFF and U+3000 but keeps U+0085 (NEL), which Rust's `trim` strips.
+        assert_eq!(
+            label(
+                "darwin",
+                &[("scutil", Some("\u{feff}\u{3000}Mac\u{2028}"))],
+                None,
+                None,
+                "c"
+            )
+            .0,
+            "Mac"
+        );
+        assert_eq!(
+            label(
+                "darwin",
+                &[("scutil", Some("\u{85}Mac\u{85}"))],
+                None,
+                None,
+                "c"
+            )
+            .0,
+            "\u{85}Mac\u{85}"
+        );
+        assert_eq!(label("win32", &[], None, Some("\u{85}"), "c").0, "\u{85}");
+    }
 }

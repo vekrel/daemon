@@ -1,5 +1,5 @@
 //! `detectServerMachineKind` (`ServerMachineKind.ts`).
-use super::{ReadFile, Run, normalize};
+use super::{ReadFile, Run, is_js_space, normalize};
 use std::time::Duration;
 
 /// `os` is Node's `process.platform`. `None` means the descriptor omits `platform.machine`.
@@ -43,10 +43,6 @@ const VIRTUALIZATION_MARKERS: [&str; 18] = [
     "cloud",
     "virtual machine",
 ];
-
-fn is_js_space(c: char) -> bool {
-    c.is_whitespace() || c == '\u{feff}'
-}
 
 fn from_apple_product_name(name: &str) -> Option<&'static str> {
     let n: String = name

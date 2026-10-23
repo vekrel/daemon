@@ -65,6 +65,10 @@ impl ShadowLimit {
 
 pub trait RouteHandler: Send + Sync {
     fn method_path(&self) -> (Method, &'static str);
+    /// The mode without a `[rust.handlers]` entry: `shadow` until the handler is proven.
+    fn default_mode(&self) -> Mode {
+        Mode::Shadow
+    }
     /// `None` means "not mine": Node answers, in either mode.
     fn handle<'a>(
         &'a self,

@@ -14,9 +14,24 @@ pub type Run<'a> = &'a dyn Fn(&str, &[&str], Duration) -> Option<String>;
 /// Reads a file as a string; `None` when missing or unreadable.
 pub type ReadFile<'a> = &'a dyn Fn(&str) -> Option<String>;
 
-/// JS `String.prototype.trim` (also strips U+FEFF, which Rust's `trim` keeps), then non-empty.
+/// JS WhiteSpace and LineTerminator (`trim`, `\s`): U+FEFF yes, U+0085 no, unlike `char::is_whitespace`.
+pub fn is_js_space(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{B}' | '\u{C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+    )
+}
+
+/// JS `String.prototype.trim`, then non-empty.
 pub fn normalize(s: &str) -> Option<&str> {
-    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let t = s.trim_matches(is_js_space);
     (!t.is_empty()).then_some(t)
 }
 

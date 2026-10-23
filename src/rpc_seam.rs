@@ -3,7 +3,7 @@
 //! Routing follows research section 4: frames Rust does not own are forwarded as the original
 //! bytes, and the proxy's pump is the only writer to the client socket.
 use crate::{
-    config::Mode,
+    config::{Mode, RustConfig},
     handlers::{
         HandlerCtx, VerifiedSession,
         auth_session::{AuthSession, WsSession},
@@ -22,8 +22,14 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
+/// A Rust answer for one RPC tag. Handlers must be read-only and idempotent: a served request
+/// whose handler declines or panics is forwarded to Node, which then runs it again.
 pub trait UnaryHandler: Send + Sync {
     fn tag(&self) -> &'static str;
+    /// The mode without a `[rust.handlers]` entry: `shadow` until the handler is proven.
+    fn default_mode(&self) -> Mode {
+        Mode::Shadow
+    }
     /// The scope `RpcAuthorization.ts` requires for this tag.
     fn required_scope(&self) -> &'static str;
     /// `Ok`: the Exit Success value; `Err`: the tagged error for Exit Failure `[{_tag:"Fail",error}]`;
@@ -39,7 +45,7 @@ pub trait UnaryHandler: Send + Sync {
 pub struct Seam {
     handlers: Vec<(Arc<dyn UnaryHandler>, Mode)>,
     pub ctx: HandlerCtx,
-    /// Verifies the connection's session; without it every session is unverified (denied).
+    /// Verifies the connection's session; without it every session is deferred to Node.
     auth: Option<Arc<AuthSession>>,
 }
 
@@ -57,6 +63,15 @@ impl Seam {
             handlers,
             ..Seam::default()
         }
+    }
+
+    /// Each handler in its `[rust.handlers]` mode, else its `default_mode`.
+    pub fn from_config(handlers: Vec<Arc<dyn UnaryHandler>>, cfg: &RustConfig) -> Self {
+        let handlers = handlers.into_iter().map(|h| {
+            let mode = cfg.mode(h.tag(), h.default_mode());
+            (h, mode)
+        });
+        Seam::new(handlers.collect())
     }
 
     pub fn with_ctx(mut self, ctx: HandlerCtx) -> Self {
@@ -77,7 +92,7 @@ impl Seam {
     pub(crate) async fn session(&self, h: &HeaderMap, query: Option<&str>) -> WsSession {
         match (&self.auth, self.is_empty()) {
             (Some(a), false) => a.ws_session(h, query).await,
-            _ => WsSession::Unverified,
+            _ => WsSession::Deferred,
         }
     }
 
@@ -171,6 +186,16 @@ fn interrupted() -> Value {
     failure(json!({"_tag": "Interrupt", "fiberId": 0}))
 }
 
+/// Whether a client frame might hold a Request, Ack or Interrupt, so it is worth parsing. Looks
+/// for the quoted tag value, which no whitespace can split; any `\` escape (the tag could be
+/// spelled with one) also parses. Pings and the like skip the parse.
+fn may_route(text: &str) -> bool {
+    text.contains('\\')
+        || ["\"Request\"", "\"Ack\"", "\"Interrupt\""]
+            .iter()
+            .any(|t| text.contains(t))
+}
+
 /// What to send upstream for a client frame.
 pub(crate) enum Fwd {
     Original,
@@ -220,7 +245,7 @@ impl Conn {
     /// Routes a client text frame: what goes upstream, and frames Rust answers right away.
     pub(crate) fn c2s(&mut self, text: &str) -> (Fwd, Vec<String>) {
         let mut out = Vec::new();
-        if self.seam.is_empty() {
+        if self.seam.is_empty() || !may_route(text) {
             return (Fwd::Original, out);
         }
         let fwd = match serde_json::from_str::<Value>(text) {
@@ -289,7 +314,7 @@ impl Conn {
             WsSession::Verified(s) if s.scopes.iter().any(|x| x == h.required_scope()) => {
                 Some(s.clone())
             }
-            WsSession::Verified(_) | WsSession::Unverified => None,
+            WsSession::Verified(_) => None,
         };
         let denied =
             || failure(json!({"_tag": "Fail", "error": authorization_error(h.required_scope())}));
@@ -312,9 +337,8 @@ impl Conn {
                 let done = self.done.clone();
                 let id = id.clone();
                 tokio::spawn(async move {
-                    // What Node sends for a defect, so the client's request still ends.
-                    let die = || failure(json!({"_tag": "Die", "defect": "rust handler panicked"}));
-                    let exit = task.await.unwrap_or_else(|_| Some(die()));
+                    // A panic declines: Node answers (handlers are read-only, so rerunning is safe).
+                    let exit = task.await.ok().flatten();
                     let _ = done.send(Done { key, id, exit });
                 });
                 true
@@ -457,5 +481,25 @@ impl Conn {
             tracing::warn!(tag, outcome = "mismatch", path, "rust shadow");
         }
         self.shadow.remove(&key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_route;
+
+    #[test]
+    fn pre_check_skips_only_frames_that_cannot_be_routed() {
+        for f in [
+            r#"{"_tag":"Request","id":1}"#,
+            r#"{ "_tag" : "Ack" , "requestId" : 1 }"#,
+            r#"[{"_tag":"Ping"},{"_tag":"Interrupt","requestId":1}]"#,
+            r#"{"_tag":"Requ\u0065st"}"#,
+        ] {
+            assert!(may_route(f), "{f}");
+        }
+        for f in [r#"{"_tag":"Ping"}"#, r#"{"_tag":"Eof"}"#, "not json"] {
+            assert!(!may_route(f), "{f}");
+        }
     }
 }

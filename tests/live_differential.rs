@@ -698,3 +698,65 @@ fn browse_shadow_matches_node() {
     drop(d);
     assert!(!home.exists());
 }
+
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn unsupported_engine_flag_defers_served_rpcs_to_node() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    // `--host` is a flag Rust cannot reproduce, so it verifies no WS session; readFile in serve.
+    let Some((d, base, home, token)) = start_with("unsupported", |home, cmd| {
+        let cfg = home.join("vekrel.toml");
+        let t = std::fs::read_to_string(&cfg).unwrap();
+        let t = t
+            .replacen("bin.mjs\"]", "bin.mjs\", \"--host\", \"127.0.0.1\"]", 1)
+            .replace(
+                "\"projects.readFile\" = \"shadow\"",
+                "\"projects.readFile\" = \"serve\"",
+            );
+        assert!(t.contains("--host") && t.contains("= \"serve\""), "{t}");
+        std::fs::write(&cfg, t).unwrap();
+        std::fs::create_dir_all(home.join("ws")).unwrap();
+        std::fs::write(home.join("ws/small.txt"), b"hello\n").unwrap();
+        cmd.current_dir(home.join("ws"));
+    }) else {
+        return;
+    };
+    let cookie = pair(&base, &home, &token);
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let ws = home.join("ws").to_string_lossy().into_owned();
+    let exit = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut req = format!("ws://127.0.0.1:{port}/ws?orchestrationProtocol=2")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert("cookie", cookie.parse().unwrap());
+        let (mut c, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+        let m = json!({"_tag":"Request","id":7,"tag":"projects.readFile",
+            "payload":{"cwd": ws, "relativePath": "small.txt"},"headers":[]});
+        c.send(Message::text(m.to_string())).await.unwrap();
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(20), c.next()).await;
+            let Ok(Some(Ok(Message::Text(t)))) = msg else {
+                panic!("no frame: {msg:?}")
+            };
+            let v: Value = serde_json::from_str(t.as_str()).unwrap();
+            if let Some(m) = v
+                .as_array()
+                .cloned()
+                .unwrap_or(vec![v])
+                .into_iter()
+                .find(|m| m["_tag"] == "Exit" && m["requestId"] == 7)
+            {
+                break m["exit"].clone();
+            }
+        }
+    });
+    println!("readFile with --host: {exit}");
+    assert_eq!(exit["_tag"], "Success", "Node answered, not a Rust denial");
+    let l = log(&home);
+    assert!(l.contains("deferred_unverifiable_credential"), "{l}");
+    drop(d);
+    assert!(!home.exists());
+}
