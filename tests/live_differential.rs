@@ -4574,3 +4574,182 @@ fn turn_item_real_db_shadow_matches_node() {
     drop(d);
     assert!(!home.exists());
 }
+
+/// Sends each `(tag, payload)` over one daemon WS (all at once, so they interleave in Node) and
+/// returns each request's Exit text, in order. The socket stays open until `settled()` (up to
+/// 120 s): closing it cancels shadow computations still running.
+fn ws_exits(
+    base: &str,
+    cookie: &str,
+    reqs: &[(&str, serde_json::Value)],
+    settled: impl Fn() -> bool,
+) -> Vec<String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let port = base.rsplit(':').next().unwrap().to_owned();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut c = auth_ws(&port, cookie).await;
+        for (id, (tag, payload)) in reqs.iter().enumerate() {
+            let r = serde_json::json!({"_tag":"Request","id":id.to_string(),"tag":tag,
+                "payload":payload,"traceId":"0123456789abcdef0123456789abcdef",
+                "spanId":"0123456789abcdef","sampled":true,"headers":[]});
+            c.send(Message::text(r.to_string())).await.unwrap();
+        }
+        let mut exits = vec![None; reqs.len()];
+        while exits.iter().any(Option::is_none) {
+            let m = tokio::time::timeout(Duration::from_secs(60), c.next())
+                .await
+                .expect("reply")
+                .unwrap()
+                .unwrap();
+            let Message::Text(t) = m else { continue };
+            let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+            for m in v.as_array().cloned().unwrap_or(vec![v]) {
+                if m["_tag"] == "Exit" {
+                    let i: usize = m["requestId"].as_str().unwrap().parse().unwrap();
+                    exits[i] = Some(m["exit"].to_string());
+                }
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !settled() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        exits.into_iter().map(Option::unwrap).collect()
+    })
+}
+
+/// getArchivedShellSnapshot log outcomes: shadow outcomes (`match`, `mismatch`,
+/// `sequence_skew`) and decline reasons; mismatch lines (paths only) are printed.
+fn archived_outcomes(home: &Path) -> std::collections::BTreeMap<String, usize> {
+    let mut out = std::collections::BTreeMap::new();
+    let tag = "tag=\"orchestration.getArchivedShellSnapshot\"";
+    for l in log(home).lines().filter(|l| l.contains(tag)) {
+        let field = |k: &str| l.split(&format!("{k}=\"")).nth(1)?.split('"').next();
+        let key = if l.contains("rust shadow") {
+            field("outcome").unwrap().to_owned()
+        } else if l.contains("archived shell declined") {
+            format!("declined:{}", field("reason").unwrap())
+        } else {
+            continue;
+        };
+        if key == "mismatch" {
+            println!("{l}");
+        }
+        *out.entry(key).or_insert(0) += 1;
+    }
+    out
+}
+
+/// Plan 6B Task 9: `orchestration.getArchivedShellSnapshot` configured `serve` runs in shadow
+/// (Node's enrichment cache), and Rust's answer equals Node's on the synthetic scenarios while
+/// Node archives and unarchives threads during the run (a write between the two reads is
+/// `sequence_skew`, never a mismatch). Requests alone write nothing.
+#[test]
+#[ignore = "needs VEKREL_LIVE_ENGINE=<engine bin.mjs>"]
+fn archived_shell_shadow_matches_node_while_threads_move() {
+    use vekrel::shell::fixture;
+    const TAG: &str = "orchestration.getArchivedShellSnapshot";
+    let Some((d, base, home, token)) = start_with("archived", |h, cmd| {
+        isolate_engine(h, cmd);
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(h.join("vekrel.toml"))
+            .unwrap();
+        writeln!(f, "\"{TAG}\" = \"serve\"").unwrap();
+    }) else {
+        return;
+    };
+    assert!(
+        log(&home).contains(&format!("{TAG} runs in shadow")),
+        "serve downgraded:\n{}",
+        log(&home)
+    );
+    let cookie = pair(&base, &home, &token);
+    let db_path = home.join("userdata/statev2.sqlite");
+    {
+        let c = rusqlite::Connection::open(&db_path).unwrap();
+        c.busy_timeout(Duration::from_secs(20)).unwrap();
+        // Threads Node can move: plain ones (like `fx-empty`), one active, one archived.
+        let mut fx = fixture::scenarios();
+        fx.thread("mv-a", 50, serde_json::json!({}));
+        fx.thread("mv-b", 51, serde_json::json!({"archivedAt": fixture::T0}));
+        c.execute_batch(&format!("BEGIN IMMEDIATE; {} COMMIT;", fx.0))
+            .unwrap();
+    }
+    let wait = |n: usize| {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let o = archived_outcomes(&home);
+            if o.values().sum::<usize>() >= n || Instant::now() > deadline {
+                return o;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    let snap = || (TAG, serde_json::json!({}));
+    // Reads alone. (No DB dump here: Node's own background jobs, such as auto-settle, write
+    // during the run; the unit test `snapshot_leaves_the_db_file_unchanged` covers Rust.)
+    let total = || archived_outcomes(&home).values().sum::<usize>();
+    let exits = ws_exits(&base, &cookie, &vec![snap(); 10], || total() >= 10);
+    assert!(exits.iter().all(|e| e.contains(r#""_tag":"Success""#)));
+    assert!(
+        exits[0].contains(r#""id":"fx-root""#),
+        "archived fixtures reached"
+    );
+    let o = wait(10);
+    assert_eq!(
+        o.get("match").unwrap_or(&0) + o.get("sequence_skew").unwrap_or(&0),
+        10,
+        "{o:?}"
+    );
+    // Node moves threads while snapshots are in flight.
+    let movers = ["fx-empty", "mv-a", "mv-b"];
+    for i in 0..12 {
+        let id = movers[i % movers.len()];
+        let kind = if (i / movers.len()).is_multiple_of(2) {
+            if id == "mv-b" {
+                "thread.unarchive"
+            } else {
+                "thread.archive"
+            }
+        } else if id != "mv-b" {
+            "thread.unarchive"
+        } else {
+            "thread.archive"
+        };
+        let cmd =
+            serde_json::json!({"type": kind, "commandId": format!("cmd-{i}"), "threadId": id});
+        // One snapshot races the command; three follow its commit.
+        let n = 10 + 4 * i;
+        let racing = [("orchestration.dispatchCommand", cmd), snap()];
+        let exits = ws_exits(&base, &cookie, &racing, || total() > n);
+        assert!(
+            exits[0].contains(r#""_tag":"Success""#),
+            "command {i}: {}",
+            exits[0]
+        );
+        ws_exits(&base, &cookie, &[snap(), snap(), snap()], || {
+            total() >= n + 4
+        });
+    }
+    let o = wait(58);
+    println!("getArchivedShellSnapshot: {o:?}");
+    assert_eq!(o.get("mismatch"), None, "{o:?}");
+    assert_eq!(
+        o.get("match").unwrap_or(&0) + o.get("sequence_skew").unwrap_or(&0),
+        58,
+        "every snapshot compared (10 + 48): {o:?}"
+    );
+    assert!(
+        o.get("match").unwrap_or(&0) > &10,
+        "some compared while moving: {o:?}"
+    );
+    assert!(o.keys().all(|k| !k.starts_with("declined")), "{o:?}");
+    // Nothing reached Node unanswered: no `x-vekrel` serve path for this tag.
+    assert!(!log(&home).contains("mode=\"serve\" outcome=\"declined\""));
+    drop(d);
+    assert!(!home.exists());
+}

@@ -1,5 +1,6 @@
 //! Rust answers for requests Node would otherwise handle. See `http_seam` and `rpc_seam` for how
 //! they are wired.
+pub mod archived_shell;
 pub mod auth_access;
 pub mod auth_session;
 pub mod browse;
@@ -58,10 +59,10 @@ pub fn guard_write(
 }
 
 /// Routes that may never `serve`.
-/// shortcut: `GET /api/projects` answers Node's cold-cache enrichment (`repositoryIdentity: null`,
+/// shortcut: `GET /api/projects` and `orchestration.getArchivedShellSnapshot` answer Node's cold-cache enrichment (`repositoryIdentity: null`,
 /// the row's `faviconPath`) and cannot see Node's warm cache, so serving it breaks byte parity;
 /// lift this once Rust owns the shell stream's enrichment cache.
-pub const SHADOW_ONLY_KEYS: [&str; 1] = [projects::KEY];
+pub const SHADOW_ONLY_KEYS: [&str; 2] = [projects::KEY, archived_shell::TAG];
 
 /// `mode` for route `key`, except a shadow-only route configured `serve`: `shadow`.
 pub fn guard_shadow_only(key: &str, mode: crate::config::Mode) -> crate::config::Mode {
@@ -96,6 +97,7 @@ mod tests {
         assert_eq!(guard_shadow_only(projects::KEY, Serve), Shadow);
         assert_eq!(guard_shadow_only(projects::KEY, Shadow), Shadow);
         assert_eq!(guard_shadow_only(projects::KEY, Off), Off);
+        assert_eq!(guard_shadow_only(archived_shell::TAG, Serve), Shadow);
         assert_eq!(guard_shadow_only(clients::LIST_KEY, Serve), Serve);
     }
 }

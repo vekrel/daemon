@@ -292,17 +292,22 @@ pub fn diff(
             return Some(("header", name.into()));
         }
     }
-    if body == rust.body() {
+    diff_body(cmp, body, rust.body())
+}
+
+/// `diff` for two JSON bodies alone (Node's, Rust's): status and headers aside.
+pub fn diff_body(cmp: &Compare, body: &[u8], rust: &[u8]) -> Option<(&'static str, String)> {
+    if body == rust {
         return None;
     }
     let (Ok(mut a), Ok(mut b)) = (
         serde_json::from_slice::<Value>(body),
-        serde_json::from_slice::<Value>(rust.body()),
+        serde_json::from_slice::<Value>(rust),
     ) else {
         return Some(("body", "$ (not json)".into()));
     };
     let canonical = |v: &Value, raw: &[u8]| serde_json::to_vec(v).is_ok_and(|c| c == raw);
-    if !canonical(&a, body) || !canonical(&b, rust.body()) {
+    if !canonical(&a, body) || !canonical(&b, rust) {
         return Some(("body", "$ (formatting)".into()));
     }
     let raw = (!cmp.enrich.is_empty()).then(|| (a.clone(), b.clone()));

@@ -45,6 +45,16 @@ pub trait UnaryHandler: Send + Sync {
         payload: Value,
         ctx: &'a HandlerCtx,
     ) -> BoxFuture<'a, Option<Result<Value, Value>>>;
+    /// Shadow, when Node's Exit bytes differ from Rust's: `(outcome, field, path)`. By default a
+    /// `mismatch` at the first differing path; a handler may name a difference that is not one
+    /// (`sequence_skew`: a write landed between the two reads).
+    fn shadow_diff(&self, node: &str, rust: &str) -> (&'static str, &'static str, String) {
+        (
+            "mismatch",
+            "exit",
+            json_path(node.as_bytes(), rust.as_bytes()),
+        )
+    }
 }
 
 /// A stream's Chunks: each `Ok` is one Chunk's `values`; an `Err` ends the stream with Exit
@@ -142,7 +152,15 @@ impl Seam {
     /// Each handler in its `[rust.handlers]` mode, else its `default_mode`.
     pub fn from_config(handlers: Vec<Arc<dyn UnaryHandler>>, cfg: &RustConfig) -> Self {
         let handlers = handlers.into_iter().map(|h| {
-            let mode = cfg.mode(h.tag(), h.default_mode());
+            let configured = cfg.mode(h.tag(), h.default_mode());
+            let mode = crate::handlers::guard_shadow_only(h.tag(), configured);
+            if mode != configured {
+                tracing::warn!(
+                    tag = h.tag(),
+                    "{} runs in shadow: it may not serve until Rust owns Node's enrichment cache",
+                    h.tag()
+                );
+            }
             (h, mode)
         });
         Seam::new(handlers.collect())
@@ -723,8 +741,19 @@ impl Conn {
         if node == rust {
             tracing::info!(tag, outcome = "match", "rust shadow");
         } else {
-            let path = json_path(node.as_bytes(), rust.as_bytes());
-            tracing::warn!(tag, outcome = "mismatch", path, "rust shadow");
+            let diff = match self.seam.find(tag) {
+                Some((Handler::Unary(h), _)) => h.shadow_diff(node, rust),
+                _ => (
+                    "mismatch",
+                    "exit",
+                    json_path(node.as_bytes(), rust.as_bytes()),
+                ),
+            };
+            let (outcome, field, path) = diff;
+            match outcome {
+                "mismatch" => tracing::warn!(tag, outcome, field, path, "rust shadow"),
+                _ => tracing::info!(tag, outcome, field, path, "rust shadow"),
+            }
         }
         self.shadow.remove(&key);
     }

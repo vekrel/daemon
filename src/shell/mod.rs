@@ -15,6 +15,10 @@ pub mod wire;
 
 pub use sql::{Location, latest_application_sequence};
 
+/// `ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION` (`ProjectionStore.ts:593`): the snapshots'
+/// `schemaVersion`.
+pub const SCHEMA_VERSION: i64 = 2;
+
 use crate::db::read;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -188,4 +192,4 @@ pub fn build_threads(c: &Connection, location: Location) -> Result<Vec<Value>, D
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

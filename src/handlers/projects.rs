@@ -171,6 +171,36 @@ fn project(r: &Row) -> Option<Value> {
     }))
 }
 
+/// `ProjectStoreV2.listShells()` (`toShell` of each `list()` row, `ProjectStore.ts:56-71`) encoded
+/// with `OrchestrationProjectShell` (`contracts/orchestrationProject.ts:8-22`): the `Project`
+/// fields in shell order, without `deletedAt`, `repositoryIdentity` the cold `null`. `Ok(None)`:
+/// a row Rust cannot reproduce (decline).
+pub fn shells(c: &rusqlite::Connection) -> rusqlite::Result<Option<Vec<Value>>> {
+    const KEYS: [&str; 12] = [
+        "id",
+        "title",
+        "workspaceRoot",
+        "repositoryIdentity",
+        "defaultModelSelection",
+        "defaultThreadEnvMode",
+        "autoPull",
+        "faviconPath",
+        "projectIcon",
+        "scripts",
+        "createdAt",
+        "updatedAt",
+    ];
+    Ok(rows(c)?
+        .iter()
+        .map(|r| {
+            let mut p = project(r)?;
+            Some(Value::Object(
+                KEYS.iter().map(|&k| (k.into(), p[k].take())).collect(),
+            ))
+        })
+        .collect())
+}
+
 /// `TrimmedNonEmptyString` that its decode and encode leave unchanged. Untrimmed text, which
 /// Effect would trim, declines rather than being trimmed here.
 fn trimmed(s: &str) -> bool {
