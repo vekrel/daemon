@@ -102,7 +102,25 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     let Some((mode, h)) = upstream.seam.find(req.method(), &path) else {
         return forward(&upstream, req).await;
     };
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    let body = if h.wants_body() {
+        match http_seam::buffer(body, &parts.headers).await {
+            Ok(Ok(bytes)) => {
+                parts
+                    .extensions
+                    .insert(http_seam::RequestBody(bytes.clone()));
+                Body::from(bytes)
+            }
+            // Too large: Node's, with every byte replayed.
+            Ok(Err(body)) => return forward(&upstream, Request::from_parts(parts, body)).await,
+            Err(e) => {
+                tracing::warn!("request body failed: {e}");
+                return error(StatusCode::BAD_REQUEST, "request_body_failed");
+            }
+        }
+    } else {
+        body
+    };
     if mode == Mode::Serve {
         return match h.handle(&parts, &upstream.seam.ctx).await {
             Some(r) => http_seam::served(r),
@@ -110,14 +128,19 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
         };
     }
     // Shadow: Rust runs beside Node and never delays Node's answer.
-    let (seam, rust_parts, route) = (upstream.seam.clone(), parts.clone(), http_seam::key(&*h));
+    let (seam, rust_parts, route, cmp) = (
+        upstream.seam.clone(),
+        parts.clone(),
+        http_seam::key(&*h),
+        h.compare(),
+    );
     let rust = upstream.shadow.spawn(
         &route,
         async move { h.handle(&rust_parts, &seam.ctx).await },
     );
     let node = forward(&upstream, Request::from_parts(parts, body)).await;
     match rust {
-        Some(rust) => http_seam::tee(node, rust, route),
+        Some(rust) => http_seam::tee(node, rust, route, cmp),
         None => node,
     }
 }

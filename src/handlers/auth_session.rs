@@ -91,6 +91,10 @@ impl AuthSession {
     pub fn new(desc: Descriptor, files: Arc<AuthFiles>) -> Self {
         AuthSession { desc, files }
     }
+
+    pub(crate) fn files(&self) -> &Arc<AuthFiles> {
+        &self.files
+    }
 }
 
 impl RouteHandler for AuthSession {
@@ -122,7 +126,7 @@ impl RouteHandler for AuthSession {
     }
 }
 
-enum Cred {
+pub(crate) enum Cred {
     Missing,
     /// A credential Node rejects before verifying it (cookie from a foreign origin).
     Rejected,
@@ -134,7 +138,7 @@ enum Cred {
 
 impl AuthSession {
     /// `MachineAuth.authenticateRequest` up to `authenticateToken`. `None`: Node answers.
-    fn credential(&self, h: &HeaderMap) -> Option<Cred> {
+    pub(crate) fn credential(&self, h: &HeaderMap) -> Option<Cred> {
         let cookie_header = joined(h, header::COOKIE, "; ")?;
         let cookies = parse_cookies(cookie_header.as_deref().unwrap_or(""));
         let authz = match h.get(header::AUTHORIZATION) {
@@ -291,35 +295,47 @@ pub enum WsSession {
 /// `SessionStore.verify` + `rejectMcpClientAudience` + the DPoP checks. `Some(None)`: a
 /// credential error (unauthenticated); `None`: Node answers (files unavailable, DPoP proof).
 fn verify(files: &AuthFiles, t: &str, dpop: Option<&str>) -> Option<Option<VerifiedSession>> {
+    Some(
+        verify_claims(files, t, dpop)?
+            .ok()
+            .map(|p| VerifiedSession {
+                scopes: p.scopes,
+                method: p.method,
+                exp: p.exp,
+            }),
+    )
+}
+
+/// `verify` with the token claims, and for a credential error its `dpopFailureReason`.
+pub(crate) fn verify_claims(
+    files: &AuthFiles,
+    t: &str,
+    dpop: Option<&str>,
+) -> Option<Result<token::Payload, Option<&'static str>>> {
     let key = files.key()?;
     let Ok(p) = token::verify(t, &key) else {
-        return Some(None);
+        return Some(Err(None));
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
     if p.exp <= now {
-        return Some(None);
+        return Some(Err(None));
     }
     // Only existence and revocation: Node reads scopes, method and expiry from the claims.
     match files.lookup(&p.sid)? {
         Some(row) if row.revoked_at.is_none() => {}
-        _ => return Some(None),
+        _ => return Some(Err(None)),
     }
     if p.sub == "mcp-client" {
-        return Some(None);
+        return Some(Err(None));
     }
     match (p.jkt.is_some(), dpop) {
         // Proof-bound token presented as DPoP: the proof check is Node's.
-        (true, Some(d)) if d == t => return None,
-        (true, _) | (false, Some(_)) => return Some(None),
-        (false, None) => {}
+        (true, Some(d)) if d == t => None,
+        (true, _) | (false, Some(_)) => Some(Err(Some("invalid_proof"))),
+        (false, None) => Some(Ok(p)),
     }
-    Some(Some(VerifiedSession {
-        scopes: p.scopes,
-        method: p.method,
-        exp: p.exp,
-    }))
 }
 
 /// `parseBearerToken` / `parseDpopToken`.
@@ -439,7 +455,7 @@ fn url_host(origin: &str) -> Option<String> {
 }
 
 /// `Date.prototype.toISOString` for epoch milliseconds (years 0000-9999).
-fn iso_millis(ms: i64) -> String {
+pub(crate) fn iso_millis(ms: i64) -> String {
     let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
     // Howard Hinnant's civil_from_days.
     let z = days + 719_468;

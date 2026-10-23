@@ -1,6 +1,9 @@
 pub mod auth;
 pub mod config;
+pub mod cookies;
 pub mod handlers;
+pub mod http_auth;
+pub mod http_errors;
 pub mod http_seam;
 pub mod machine;
 pub mod proxy_http;
