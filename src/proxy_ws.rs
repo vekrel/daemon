@@ -276,6 +276,7 @@ async fn pump<U>(
                     if client.send(rust(f)).await.is_err() { gone = true; break }
                 }
                 if gone { break }
+                rpc.drained().await;
                 let sent = match fwd {
                     Fwd::Original => up.send(m).await,
                     Fwd::Text(t) => up.send(Message::text(t)).await,
@@ -300,7 +301,10 @@ async fn pump<U>(
             Some(d) = done.recv() => {
                 let sent = match rpc.done(d) {
                     Some(Out::Client(f)) => client.send(rust(f)).await.map_err(drop),
-                    Some(Out::Node(t)) => up.send(Message::text(t)).await.map_err(drop),
+                    Some(Out::Node(t)) => {
+                        rpc.drained().await;
+                        up.send(Message::text(t)).await.map_err(drop)
+                    }
                     None => Ok(()),
                 };
                 if sent.is_err() { break }

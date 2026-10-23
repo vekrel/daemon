@@ -12,7 +12,9 @@ use super::{
     HandlerCtx,
     auth_access::{AuthAccess, open_db, read},
     auth_session::{AuthSession, iso_millis},
-    pairing_links::{Writer, blocking, body, bypassed, caller, now_ms, opt_trimmed, write_db},
+    pairing_links::{
+        Writer, blocking, body, bypassed, caller, gate, now_ms, opt_trimmed, write_db,
+    },
 };
 use crate::{
     http_auth::{self, DpopCtx},
@@ -164,9 +166,10 @@ impl RouteHandler for RevokeClient {
                 return declined(REVOKE_KEY, "mode_mismatch");
             };
             let revoked = if serve {
-                if let Some(why) = bypassed(&w.access).await {
-                    return declined(REVOKE_KEY, why);
-                }
+                let _gate = match gate(&w.access).await {
+                    Ok(g) => g,
+                    Err(why) => return declined(REVOKE_KEY, why),
+                };
                 let (auth, id) = (w.auth.clone(), id.clone());
                 let ids = blocking(move || {
                     revoke(&write_db(&auth).ok()?, Some(&id), None, &iso_millis(now))
@@ -224,9 +227,10 @@ impl RouteHandler for RevokeOtherClients {
             };
             let cur = p.session_id;
             let count = if serve {
-                if let Some(why) = bypassed(&w.access).await {
-                    return declined(REVOKE_OTHERS_KEY, why);
-                }
+                let _gate = match gate(&w.access).await {
+                    Ok(g) => g,
+                    Err(why) => return declined(REVOKE_OTHERS_KEY, why),
+                };
                 let auth = w.auth.clone();
                 let ids = blocking(move || {
                     revoke(&write_db(&auth).ok()?, None, Some(&cur), &iso_millis(now))

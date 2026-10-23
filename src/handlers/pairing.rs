@@ -624,6 +624,12 @@ async fn run(
     let files = auth.files().clone();
     let a = Arc::new(a);
     let (f, a2, c2, acc) = (files.clone(), a.clone(), ctx.clone(), access.clone());
+    // Held from the bypass check (below, after acquiring) through the commit: `Registry::drain`.
+    let gate = if ctx.serve {
+        Some(access.registry().writing().await)
+    } else {
+        None
+    };
     let joined = tokio::task::spawn_blocking(move || {
         // Before any write (the DPoP marker included).
         match acc.bypass().filter(|_| c2.serve) {
@@ -632,6 +638,7 @@ async fn run(
         }
     })
     .await;
+    drop(gate);
     let issued = if a.browser {
         "browser_session_issuance_failed"
     } else {

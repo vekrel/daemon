@@ -1652,3 +1652,148 @@ async fn a_binary_frame_holds_a_node_stream() {
     let _ = c.close(None).await;
     until(|| reg.node_streams() == 0).await;
 }
+
+// ---- the writer/subscribe drain barrier ----
+
+/// A served Rust pairing-link revoke of `l1` (inserted here) whose bypass check reads `reg`.
+fn revoker(
+    files: &Arc<AuthFiles>,
+    reg: &Arc<vekrel::auth::registry::Registry>,
+    db: &rusqlite::Connection,
+) -> impl std::future::Future<Output = Option<u16>> + Send + use<> {
+    use vekrel::handlers::{auth_access::AuthAccess, pairing_links as pl};
+    use vekrel::http_seam::{RequestBody, RouteHandler};
+    db.execute(
+        "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at)
+         VALUES ('l1', 'c1', 'one-time-token', '[]', 's', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+    let w = pl::Writer {
+        auth: Arc::new(AuthSession::new(
+            Descriptor::web("127.0.0.1", 3789, STATE_DIR, ""),
+            files.clone(),
+        )),
+        access: Arc::new(AuthAccess::new(files.clone(), reg.clone(), false)),
+        serve: true,
+    };
+    let mut parts = axum::http::Request::builder()
+        .method("POST")
+        .uri("http://127.0.0.1:3789/api/auth/pairing-links/revoke")
+        .header("host", "127.0.0.1:3789")
+        .header("content-type", "application/json")
+        .header("cookie", cookie(&["access:write"]))
+        .body(())
+        .unwrap()
+        .into_parts()
+        .0;
+    parts
+        .extensions
+        .insert(RequestBody(r#"{"id":"l1"}"#.into()));
+    parts.extensions.insert(vekrel::http_auth::DpopCtx {
+        serve: true,
+        ..Default::default()
+    });
+    async move {
+        pl::RevokePairingLink(w)
+            .handle(&parts, &HandlerCtx::default())
+            .await
+            .map(|r| r.status().as_u16())
+    }
+}
+
+fn revoked(files: &AuthFiles) -> bool {
+    rusqlite::Connection::open(files.db_path())
+        .unwrap()
+        .query_row(
+            "SELECT revoked_at IS NOT NULL FROM auth_pairing_links WHERE id = 'l1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// Plan 5's race: a Rust writer past its bypass check but not yet committed, and a subscribe
+/// Node serves forwarded meanwhile. Node reads its snapshot when the frame arrives (here: the
+/// test reads the DB at that moment), so the forward must wait for the commit.
+#[tokio::test]
+async fn a_subscribe_forwarded_to_node_waits_for_an_in_flight_auth_write() {
+    let (_dir, files, db) = access_env();
+    // Shadow: Node serves the subscribe; the session is verified, so no bypass cause exists.
+    let s = access_seam(Mode::Shadow, &files);
+    let reg = s.registry().clone();
+    let mut r = rig(s).await;
+    let write = revoker(&files, &reg, &db);
+    // Another connection holds SQLite's write lock: the writer passes its check, then waits.
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let writer = tokio::spawn(write);
+    let t = std::time::Instant::now();
+    while reg.drain(Duration::ZERO).await {
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "the writer never took the gate"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Its bypass check (one read_dir) runs right after it takes the gate.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    let sub = request(1, "subscribeAuthAccess", json!({}));
+    send(&mut c, &sub).await;
+    let early = tokio::time::timeout(Duration::from_millis(500), r.ev.recv()).await;
+    assert!(
+        early.is_err(),
+        "forwarded before the write committed: {early:?}"
+    );
+    assert!(!revoked(&files), "the writer is still paused");
+    db.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(next_ev(&mut r).await, format!("text:{sub}"));
+    assert!(revoked(&files), "Node's snapshot misses the write");
+    assert_eq!(writer.await.unwrap(), Some(200), "the writer committed");
+    assert_eq!(reg.node_streams(), 1);
+}
+
+/// A writer that declines releases the gate: the forward goes at once, nothing is written.
+#[tokio::test]
+async fn a_declining_writer_never_holds_up_a_forward() {
+    let (dir, files, db) = access_env();
+    let s = access_seam(Mode::Shadow, &files);
+    let reg = s.registry().clone();
+    let mut r = rig(s).await;
+    std::fs::write(dir.path().join("cloud-relay-url.bin"), b"https://relay").unwrap();
+    assert_eq!(revoker(&files, &reg, &db).await, None, "declined to Node");
+    assert!(reg.drain(Duration::ZERO).await);
+    std::fs::remove_file(dir.path().join("cloud-relay-url.bin")).unwrap();
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    let sub = request(1, "subscribeAuthAccess", json!({}));
+    let t = std::time::Instant::now();
+    send(&mut c, &sub).await;
+    assert_eq!(next_ev(&mut r).await, format!("text:{sub}"));
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(!revoked(&files));
+    // Writers arriving after the forward see Node's stream and decline without waiting.
+    let t = std::time::Instant::now();
+    db.execute("DELETE FROM auth_pairing_links", []).unwrap();
+    assert_eq!(revoker(&files, &reg, &db).await, None);
+    assert!(t.elapsed() < Duration::from_secs(2));
+    assert!(!revoked(&files));
+}
+
+/// With no writer in flight, a forward that takes the node stream is not delayed.
+#[tokio::test]
+async fn the_barrier_never_delays_a_forward_with_no_writer() {
+    let (_dir, files, _db) = access_env();
+    let mut r = rig(access_seam(Mode::Shadow, &files)).await;
+    let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
+    for id in 1..=20 {
+        let sub = request(id, "subscribeAuthAccess", json!({}));
+        let t = std::time::Instant::now();
+        send(&mut c, &sub).await;
+        assert_eq!(next_ev(&mut r).await, format!("text:{sub}"));
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "{id}: {:?}",
+            t.elapsed()
+        );
+    }
+}

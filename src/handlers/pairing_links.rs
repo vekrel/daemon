@@ -170,6 +170,15 @@ pub(crate) async fn bypassed(a: &Arc<AuthAccess>) -> Option<&'static str> {
         .unwrap_or(Some("bypass_check_failed"))
 }
 
+/// `bypassed` for a writer: on `Ok`, hold the guard through the commit (or decline), so a
+/// subscribe forwarded to Node meanwhile waits for it (`Registry::drain`).
+pub(crate) async fn gate(
+    a: &Arc<AuthAccess>,
+) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, &'static str> {
+    let g = a.registry().writing().await;
+    bypassed(a).await.map_or(Ok(g), Err)
+}
+
 fn declined(route: &str, why: &str) -> Option<Response<Bytes>> {
     tracing::info!(route, why, outcome = "declined", "rust pairing links");
     None
@@ -248,9 +257,10 @@ impl RouteHandler for CreatePairingToken {
                 return declined(ROUTE, "mode_mismatch");
             };
             if serve {
-                if let Some(why) = bypassed(&w.access).await {
-                    return declined(ROUTE, why);
-                }
+                let _gate = match gate(&w.access).await {
+                    Ok(g) => g,
+                    Err(why) => return declined(ROUTE, why),
+                };
                 let (auth, id, credential, label, expires_at) = (
                     w.auth.clone(),
                     id.clone(),
@@ -397,9 +407,10 @@ impl RouteHandler for RevokePairingLink {
                 return declined(ROUTE, "mode_mismatch");
             };
             let revoked = if serve {
-                if let Some(why) = bypassed(&w.access).await {
-                    return declined(ROUTE, why);
-                }
+                let _gate = match gate(&w.access).await {
+                    Ok(g) => g,
+                    Err(why) => return declined(ROUTE, why),
+                };
                 blocking(move || {
                     let c = write_db(&auth).ok()?;
                     c.query_row(

@@ -345,7 +345,12 @@ pub(crate) struct Conn {
     limit: ShadowLimit,
     /// Set once Node serves this socket's `subscribeAuthAccess`; dropped with the socket.
     node_stream: Option<NodeStream>,
+    /// `node_stream` was just taken: drain in-flight writers before the next frame to Node.
+    drain: bool,
 }
+
+/// Longest wait for in-flight auth writers: Node's 5 s busy_timeout plus slack.
+const DRAIN_LIMIT: Duration = Duration::from_secs(6);
 
 impl Drop for Conn {
     fn drop(&mut self) {
@@ -373,13 +378,28 @@ impl Conn {
             done,
             limit,
             node_stream: None,
+            drain: false,
         }
     }
 
     /// Node serves this socket's `subscribeAuthAccess` (or may): see `NodeStream`.
     fn hold_node_stream(&mut self) {
-        let reg = &self.seam.registry;
-        self.node_stream.get_or_insert_with(|| reg.node_stream());
+        if self.node_stream.is_none() {
+            self.node_stream = Some(self.seam.registry.node_stream());
+            self.drain = true;
+        }
+    }
+
+    /// Awaited before every frame to Node: Node reads its access snapshot when the subscribe
+    /// arrives, so writers that passed their bypass check must commit first. Later writers see
+    /// `node_stream` and decline. On timeout the frame goes anyway.
+    pub(crate) async fn drained(&mut self) {
+        if std::mem::take(&mut self.drain) && !self.seam.registry.drain(DRAIN_LIMIT).await {
+            tracing::warn!(
+                limit_ms = DRAIN_LIMIT.as_millis() as u64,
+                "auth write drain timed out; forwarding"
+            );
+        }
     }
 
     /// Node's decoder reads binary frames as JSON too: any one may be a subscribe Node serves.

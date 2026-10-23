@@ -1,16 +1,20 @@
 //! Every `/ws` socket the proxy holds, by session: what `connected` means for sockets that reach
 //! Node through Rust, and a hook to close all of a session's sockets (on a Rust-side revoke).
+use std::time::Duration;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use tokio::sync::watch;
+use tokio::sync::{RwLock, RwLockReadGuard, watch};
 use tokio_util::sync::CancellationToken;
 
 pub struct Registry {
     inner: Mutex<Inner>,
     /// Bumped on every open and close.
     changed: watch::Sender<()>,
+    /// Shared by each Rust auth writer from its bypass check through its commit (`writing`);
+    /// taken once, exclusively, before a socket's first frame Node may serve (`drain`).
+    write_gate: RwLock<()>,
 }
 
 #[derive(Default)]
@@ -29,6 +33,7 @@ impl Default for Registry {
         Registry {
             inner: Mutex::default(),
             changed: watch::channel(()).0,
+            write_gate: RwLock::new(()),
         }
     }
 }
@@ -125,6 +130,20 @@ impl Registry {
         self.lock().node_streams
     }
 
+    /// Held by a writer from its `bypass::active` check (made after acquiring) to its commit.
+    pub async fn writing(&self) -> RwLockReadGuard<'_, ()> {
+        self.write_gate.read().await
+    }
+
+    /// Waits until every writer that passed its check has committed or declined; `false` if
+    /// `limit` ran out first. Call after `node_stream`: writers arriving later (queued behind
+    /// this, as tokio's RwLock is fair) then see it and decline.
+    pub async fn drain(&self, limit: Duration) -> bool {
+        tokio::time::timeout(limit, self.write_gate.write())
+            .await
+            .is_ok()
+    }
+
     /// Closes every socket of `sid`; returns how many.
     pub fn close_session(&self, sid: &str) -> usize {
         let i = self.lock();
@@ -173,5 +192,17 @@ mod tests {
         assert_eq!(r.unattributed(), 0);
         drop(b);
         assert!(r.connected_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_writers_and_gives_up_at_its_limit() {
+        let r = Registry::default();
+        assert!(r.drain(Duration::ZERO).await, "no writer: no wait");
+        let w = r.writing().await;
+        let t = std::time::Instant::now();
+        assert!(!r.drain(Duration::from_millis(300)).await);
+        assert!(t.elapsed() >= Duration::from_millis(300));
+        drop(w);
+        assert!(r.drain(Duration::ZERO).await);
     }
 }
