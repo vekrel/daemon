@@ -140,16 +140,21 @@ pub(crate) fn tee(
         return Response::from_parts(parts, body);
     }
     let (tx, rx) = oneshot::channel();
-    let (status, ct) = (
+    let (status, ct, enc) = (
         parts.status,
         parts.headers.get(header::CONTENT_TYPE).cloned(),
+        parts.headers.get(header::CONTENT_ENCODING).cloned(),
     );
     tokio::spawn(async move {
         // A handler that declines, panics, or a body that failed / was abandoned: nothing to compare.
         let (Ok(Some(rust)), Ok(bytes)) = (rust.await, rx.await) else {
             return;
         };
-        let bytes: Bytes = bytes;
+        // Node compresses bodies of 1 KiB and up when the client accepts it; compare the JSON.
+        let Some(bytes) = decoded(enc.as_ref(), bytes) else {
+            tracing::info!(route, outcome = "skipped_encoding", "rust shadow");
+            return;
+        };
         let diff = if status != rust.status() {
             Some(("status", "$".to_owned()))
         } else if ct.as_ref() != rust.headers().get(header::CONTENT_TYPE) {
@@ -173,6 +178,28 @@ pub(crate) fn tee(
         tx: Some(tx),
     };
     Response::from_parts(parts, Body::from_stream(tee))
+}
+
+/// Node's body with its `content-encoding` (Effect's `br`, `gzip`, `deflate`) undone, capped at
+/// `TEE_LIMIT`; `None` for another coding or a corrupt body.
+fn decoded(enc: Option<&HeaderValue>, body: Bytes) -> Option<Bytes> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    let limit = TEE_LIMIT + 1;
+    let r = match enc.map(|e| e.as_bytes()) {
+        None | Some(b"identity") => return Some(body),
+        Some(b"gzip") => flate2::read::GzDecoder::new(&body[..])
+            .take(limit)
+            .read_to_end(&mut out),
+        Some(b"deflate") => flate2::read::ZlibDecoder::new(&body[..])
+            .take(limit)
+            .read_to_end(&mut out),
+        Some(b"br") => brotli_decompressor::Decompressor::new(&body[..], 4096)
+            .take(limit)
+            .read_to_end(&mut out),
+        Some(_) => return None,
+    };
+    (r.is_ok() && out.len() as u64 <= TEE_LIMIT).then(|| out.into())
 }
 
 /// Passes `inner` through and sends a copy of the whole body on clean end.
@@ -252,7 +279,7 @@ fn first_diff(a: &Value, b: &Value, path: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShadowLimit, json_path};
+    use super::{ShadowLimit, decoded, json_path};
     use std::time::Duration;
 
     #[tokio::test]
@@ -291,5 +318,35 @@ mod tests {
         );
         assert_eq!(p(r#"{"a":1}"#, r#"{ "a":1}"#), "$ (formatting)");
         assert_eq!(p("x", "{}"), "$ (not json)");
+    }
+
+    #[test]
+    fn node_bodies_are_decoded_before_comparing() {
+        use std::io::Write;
+        let json = br#"{"a":1}"#;
+        let enc = |v: &str| Some(axum::http::HeaderValue::from_str(v).unwrap());
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), Default::default());
+        gz.write_all(json).unwrap();
+        let mut zl = flate2::write::ZlibEncoder::new(Vec::new(), Default::default());
+        zl.write_all(json).unwrap();
+        // `br` of `{"a":1}` from Node's zlib.brotliCompressSync.
+        let br: &[u8] = &[
+            0x0b, 0x03, 0x80, 0x7b, 0x22, 0x61, 0x22, 0x3a, 0x31, 0x7d, 0x03,
+        ];
+        for (e, body) in [
+            (None, json.to_vec()),
+            (enc("identity"), json.to_vec()),
+            (enc("gzip"), gz.finish().unwrap()),
+            (enc("deflate"), zl.finish().unwrap()),
+            (enc("br"), br.to_vec()),
+        ] {
+            assert_eq!(decoded(e.as_ref(), body.into()).as_deref(), Some(&json[..]));
+        }
+        assert_eq!(decoded(enc("zstd").as_ref(), json[..].into()), None);
+        assert_eq!(
+            decoded(enc("gzip").as_ref(), json[..].into()),
+            None,
+            "corrupt"
+        );
     }
 }
