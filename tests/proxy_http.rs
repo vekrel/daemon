@@ -304,6 +304,14 @@ async fn link_proof_passes_through_as_the_client_sent_it() {
     assert_eq!(h["x-forwarded-proto"], "https");
     assert_eq!(h["x-forwarded-for"], "10.0.0.9");
     assert!(h.get("x-vekrel-proxy").is_none());
+    // A client-sent `x-vekrel-proxy` never survives, on this route or any other.
+    reqwest::Client::new()
+        .post(format!("{base}/api/connect/link-proof"))
+        .header("x-vekrel-proxy", "spoofed")
+        .send()
+        .await
+        .unwrap();
+    assert!(seen.lock().await.get("x-vekrel-proxy").is_none());
     // Neighbouring routes keep the usual rewrite.
     reqwest::Client::new()
         .post(format!("{base}/api/connect/relay-config"))
@@ -314,6 +322,41 @@ async fn link_proof_passes_through_as_the_client_sent_it() {
     assert_eq!(h["host"], format!("127.0.0.1:{up}"));
     assert_eq!(h["x-vekrel-proxy"], "1");
     assert_eq!(h["x-forwarded-proto"], "http");
+}
+
+/// DNS rebinding: a foreign Host (or our host on another port) on the link-proof route gets 421
+/// and never reaches Node.
+#[tokio::test]
+async fn link_proof_with_untrusted_host_never_reaches_node() {
+    let (up, seen) = header_probe().await;
+    let base = proxy(up).await;
+    let port = base.rsplit(':').next().unwrap();
+    for host in [format!("evil.example:{port}"), "127.0.0.1:1".into()] {
+        let r = reqwest::Client::new()
+            .post(format!("{base}/api/connect/link-proof"))
+            .header("host", host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"untrusted_host"}"#);
+    }
+    assert!(seen.lock().await.is_empty(), "reached Node");
+}
+
+#[tokio::test]
+async fn client_supplied_vekrel_proxy_is_overwritten() {
+    let (up, seen) = header_probe().await;
+    let base = proxy(up).await;
+    reqwest::Client::new()
+        .get(format!("{base}/x"))
+        .header("x-vekrel-proxy", "spoofed")
+        .send()
+        .await
+        .unwrap();
+    let h = seen.lock().await;
+    assert_eq!(h.get_all("x-vekrel-proxy").iter().count(), 1);
+    assert_eq!(h["x-vekrel-proxy"], "1");
 }
 
 #[tokio::test]

@@ -84,8 +84,9 @@ pub(crate) fn add_forwarded(
 
 /// Node signs a link proof only for a request that reached it unproxied: no `x-forwarded-host`
 /// or `-proto`, and a Host whose port is the origin the client claims (`cloud/linkChecks.ts`).
-/// So this route reaches Node with the client's own Host and nothing added; the bind is
-/// loopback-only, and any forwarded header the client sent is Node's to refuse.
+/// So this route reaches Node with the client's own Host (only a loopback authority on the public
+/// port; any other gets 421) and nothing added; any forwarded header the client sent is Node's
+/// to refuse.
 const LINK_PROOF: &str = "/api/connect/link-proof";
 
 pub(crate) fn error(status: StatusCode, code: &str) -> Response {
@@ -127,7 +128,17 @@ pub async fn handler(State(upstream): State<Upstream>, mut req: Request<Body>) -
     let h = req.headers_mut();
     let client_host = h.get(header::HOST).cloned();
     strip_hop_by_hop(h);
-    if !unproxied {
+    // Only the daemon sets it; on the unproxied route nothing does.
+    h.remove("x-vekrel-proxy");
+    if unproxied {
+        // The client's Host reaches Node only when it is one of our own origins (DNS rebinding).
+        if !client_host
+            .as_ref()
+            .is_some_and(|v| trusted_host(v, upstream.public_port))
+        {
+            return error(StatusCode::MISDIRECTED_REQUEST, "untrusted_host");
+        }
+    } else {
         h.insert(
             header::HOST,
             HeaderValue::from_str(&authority).expect("valid host"),
