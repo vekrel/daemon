@@ -55,6 +55,10 @@ fn try_start(name: &str, command: &str, args: &[&str]) -> Option<(Guard, u16)> {
     let child = Command::new(env!("CARGO_BIN_EXE_vekrel"))
         .args(["serve", "--config"])
         .arg(&path)
+        // The browse locale gate reads the daemon's env, so the engine must see the same values.
+        .env("LC_ALL", "en-u-kn-true")
+        .env("LC_MESSAGES", "sv_SE.UTF-8")
+        .env("LANG", "de_DE.UTF-8")
         .spawn()
         .unwrap();
     let mut g = Guard(child);
@@ -168,7 +172,7 @@ async fn child_receives_vekrel_port_env() {
     std::fs::create_dir_all(&dir).unwrap();
     let (a, b) = (dir.join("port"), dir.join("rest"));
     let script = format!(
-        "echo $VEKREL_PORT > {}; echo $VEKREL_HOST $VEKREL_NO_BROWSER > {}; sleep 30",
+        "echo $VEKREL_PORT > {}; echo $VEKREL_HOST $VEKREL_NO_BROWSER $LC_ALL $LC_MESSAGES $LANG > {}; sleep 30",
         a.display(),
         b.display()
     );
@@ -183,7 +187,10 @@ async fn child_receives_vekrel_port_env() {
         std::fs::read_to_string(a).unwrap().trim(),
         (port + 10).to_string()
     );
-    assert_eq!(std::fs::read_to_string(b).unwrap().trim(), "127.0.0.1 1");
+    assert_eq!(
+        std::fs::read_to_string(b).unwrap().trim(),
+        "127.0.0.1 1 en-u-kn-true sv_SE.UTF-8 de_DE.UTF-8"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

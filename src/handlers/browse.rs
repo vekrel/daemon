@@ -214,11 +214,27 @@ pub fn sort_names(names: &mut [String]) {
 
 /// Whether Node's default locale collates like root. ICU takes it from `LC_ALL`, then
 /// `LC_MESSAGES`, then `LANG` (not `LC_COLLATE`); unset, `C`, `POSIX` and `en*` all sort as root.
+/// A BCP-47 value can carry collation keywords (`en-u-kn-true` sorts numerically), so any `-`
+/// form other than plain `en-<region>` declines; so does any POSIX `@modifier`.
 pub fn root_like_locale(get: impl Fn(&str) -> Option<String>) -> bool {
     let v = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
         .find_map(|k| get(k).filter(|v| !v.is_empty()))
         .unwrap_or_default();
-    let lang = v.split(['_', '-', '.', '@']).next().unwrap_or_default();
+    if v.contains('@') {
+        return false;
+    }
+    // The codeset (`.UTF-8`) may itself contain a `-`.
+    let id = v.split('.').next().unwrap_or_default();
+    if id.contains('-') {
+        let mut parts = id.split('-');
+        let (lang, region) = (parts.next(), parts.next());
+        let region_ok = region.is_some_and(|r| {
+            (r.len() == 2 && r.bytes().all(|b| b.is_ascii_alphabetic()))
+                || (r.len() == 3 && r.bytes().all(|b| b.is_ascii_digit()))
+        });
+        return lang == Some("en") && region_ok && parts.next().is_none();
+    }
+    let lang = id.split('_').next().unwrap_or_default();
     matches!(lang, "" | "C" | "POSIX" | "en")
 }

@@ -808,6 +808,7 @@ async fn duplicate_owned_id_is_dropped_like_node() {
 
 #[tokio::test]
 async fn serve_decline_forwards_the_original_request_to_node() {
+    let (logs, _g) = Logs::capture();
     let e = env("decline", "[]");
     let mut r = rig(seam(Mode::Serve, Arc::default(), Some(auth(&e)))).await;
     let mut c = connect(r.proxy, "", &[("cookie", cookie(&["filesystem:read"]))]).await;
@@ -828,6 +829,10 @@ async fn serve_decline_forwards_the_original_request_to_node() {
         send(&mut c, f).await;
         assert_eq!(next_ev(&mut r).await, format!("text:{f}"));
     }
+    let lines = logs.lines("rust handler declined");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("mode=\"serve\""), "{lines:?}");
+    assert!(logs.lines("rust shadow").is_empty());
 }
 
 #[tokio::test]
@@ -844,7 +849,8 @@ async fn shadow_decline_logs_declined_without_comparing() {
     );
     barrier(&mut r, &mut c, 2).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let lines = logs.lines("rust shadow");
+    let lines = logs.lines("rust handler declined");
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("outcome=\"declined\""), "{lines:?}");
+    assert!(lines[0].contains("mode=\"shadow\""), "{lines:?}");
 }

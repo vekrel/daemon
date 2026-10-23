@@ -308,7 +308,7 @@ impl Conn {
                 // An array element is re-encoded, like the remainder of a split array frame.
                 let raw = raw.map_or_else(|| m.to_string(), str::to_owned);
                 self.owned.insert(key.clone(), (cancel.clone(), raw));
-                let task = tokio::spawn(self.run(h, payload, s, cancel));
+                let task = tokio::spawn(self.run(h, payload, s, cancel, "serve"));
                 let done = self.done.clone();
                 let id = id.clone();
                 tokio::spawn(async move {
@@ -337,7 +337,7 @@ impl Conn {
                 match session {
                     None => entry.rust = Some(denied().to_string()),
                     Some(s) => {
-                        let run = self.run(h, payload, s, cancel);
+                        let run = self.run(h, payload, s, cancel, "shadow");
                         let Some(task) = self.limit.spawn(entry.tag, run) else {
                             return false;
                         };
@@ -362,6 +362,7 @@ impl Conn {
         payload: Value,
         session: VerifiedSession,
         cancel: CancellationToken,
+        mode: &'static str,
     ) -> impl Future<Output = Option<Value>> + Send + 'static {
         let ctx = HandlerCtx {
             session: Some(session),
@@ -376,7 +377,12 @@ impl Conn {
                 r = h.handle(payload, &ctx) => r,
             };
             let Some(r) = r else {
-                tracing::info!(tag = h.tag(), outcome = "declined", "rust shadow");
+                tracing::info!(
+                    tag = h.tag(),
+                    mode,
+                    outcome = "declined",
+                    "rust handler declined"
+                );
                 return None;
             };
             Some(match r {

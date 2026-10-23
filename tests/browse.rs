@@ -257,6 +257,23 @@ fn locale_gate_matches_icu_default_locale_selection() {
         ("LANG", "C")
     ])));
     assert!(!browse::root_like_locale(env(&[("LC_ALL", "de_DE.UTF-8")])));
+    // BCP-47 extensions change collation (`en-u-kn-true` sorts numerically in Node).
+    assert!(!browse::root_like_locale(env(&[(
+        "LC_ALL",
+        "en-u-kn-true"
+    )])));
+    assert!(!browse::root_like_locale(env(&[(
+        "LANG",
+        "en-US-u-co-emoji"
+    )])));
+    assert!(!browse::root_like_locale(env(&[("LANG", "en-t-de")])));
+    assert!(!browse::root_like_locale(env(&[("LANG", "en-x-foo")])));
+    assert!(!browse::root_like_locale(env(&[(
+        "LANG",
+        "en_US@collation=phonebook"
+    )])));
+    assert!(browse::root_like_locale(env(&[("LANG", "en-US")])));
+    assert!(browse::root_like_locale(env(&[("LANG", "en-419")])));
     assert!(browse::root_like_locale(env(&[(
         "LC_COLLATE",
         "sv_SE.UTF-8"

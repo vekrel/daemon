@@ -672,7 +672,10 @@ fn browse_shadow_matches_node() {
     let l = log(&home);
     let lines: Vec<&str> = l
         .lines()
-        .filter(|l| l.contains("rust shadow") && l.contains("tag=\"filesystem.browse\""))
+        .filter(|l| {
+            (l.contains("rust shadow") || l.contains("rust handler declined"))
+                && l.contains("tag=\"filesystem.browse\"")
+        })
         .collect();
     let count = |o: &str| {
         lines
