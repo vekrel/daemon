@@ -58,6 +58,10 @@ fn arrived(req: &Parts, now: i64) -> String {
 pub struct ListClients(pub Arc<AuthSession>, pub Arc<AuthAccess>);
 
 impl RouteHandler for ListClients {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::GET, "/api/auth/clients")
     }
@@ -116,6 +120,10 @@ fn close(access: &AuthAccess, ids: &[String]) {
 pub struct RevokeClient(pub Writer);
 
 impl RouteHandler for RevokeClient {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::POST, "/api/auth/clients/revoke")
     }
@@ -184,6 +192,10 @@ impl RouteHandler for RevokeClient {
 pub struct RevokeOtherClients(pub Writer);
 
 impl RouteHandler for RevokeOtherClients {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::POST, "/api/auth/clients/revoke-others")
     }
@@ -573,6 +585,42 @@ mod tests {
             let r = revoke(&e, &reg, &cookie, "nope", serve).await.unwrap();
             assert_eq!(text(r), r#"{"revoked":false}"#);
         }
+    }
+
+    #[tokio::test]
+    async fn serve_revoke_declines_on_mode_mismatch_and_bypass() {
+        let (e, cookie, reg) = setup(&["access:write"]);
+        session(
+            &e,
+            "a",
+            "one-time-token",
+            R,
+            "2026-01-02T00:00:00.000Z",
+            "2099-01-01T00:00:00.000Z",
+        );
+        let a = reg.open(Some("a"));
+        let body = json!({ "sessionId": "a" }).to_string();
+        let call = |w: Writer| {
+            let r = req(
+                "POST",
+                "/api/auth/clients/revoke",
+                &cookie,
+                Some(&body),
+                true,
+            );
+            async move { RevokeClient(w).handle(&r, &HandlerCtx::default()).await }
+        };
+        // The proxy says serve but the route is not configured serve: Node answers.
+        assert!(call(writer(&e, &reg, false)).await.is_none());
+        // A bypass: Node must make (and publish) the write.
+        let cloud = e.0.path().join("cloud-relay-url.bin");
+        std::fs::write(&cloud, "x").unwrap();
+        assert!(call(writer(&e, &reg, true)).await.is_none());
+        assert!(revoked(&e).iter().all(|r| !r.1) && !a.close.is_cancelled());
+        std::fs::remove_file(&cloud).unwrap();
+        let r = call(writer(&e, &reg, true)).await.unwrap();
+        assert_eq!(text(r), r#"{"revoked":true}"#);
+        assert!(a.close.is_cancelled());
     }
 
     #[tokio::test]

@@ -103,7 +103,7 @@ impl StreamHandler for AuthAccess {
         "subscribeAuthAccess"
     }
     fn default_mode(&self) -> Mode {
-        Mode::Shadow
+        Mode::Serve
     }
     fn required_scope(&self) -> &'static str {
         "access:read"

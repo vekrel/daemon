@@ -31,6 +31,10 @@ struct Issued {
 pub struct WsTicket(pub Arc<AuthSession>);
 
 impl RouteHandler for WsTicket {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::POST, "/api/auth/websocket-ticket")
     }

@@ -177,6 +177,10 @@ fn declined(route: &str, why: &str) -> Option<Response<Bytes>> {
 pub struct CreatePairingToken(pub Writer);
 
 impl RouteHandler for CreatePairingToken {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::POST, "/api/auth/pairing-token")
     }
@@ -301,6 +305,10 @@ fn grant_scope(s: &str) -> bool {
 pub struct ListPairingLinks(pub Arc<AuthSession>);
 
 impl RouteHandler for ListPairingLinks {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::GET, "/api/auth/pairing-links")
     }
@@ -344,6 +352,10 @@ impl RouteHandler for ListPairingLinks {
 pub struct RevokePairingLink(pub Writer);
 
 impl RouteHandler for RevokePairingLink {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::POST, "/api/auth/pairing-links/revoke")
     }

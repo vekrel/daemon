@@ -67,6 +67,21 @@ fn start(tag: &str) -> Option<(Daemon, String, PathBuf, String)> {
     start_with(tag, |_, _| {})
 }
 
+/// Plan 5's handlers default to `serve`; these tests start them in `shadow` unless `prep` says otherwise.
+const PLAN5_KEYS: [&str; 11] = [
+    "POST /api/auth/websocket-ticket",
+    "GET /ws dpop",
+    "subscribeAuthAccess",
+    "POST /api/auth/pairing-token",
+    "GET /api/auth/pairing-links",
+    "POST /api/auth/pairing-links/revoke",
+    "POST /api/auth/browser-session",
+    "POST /oauth/token",
+    "GET /api/auth/clients",
+    "POST /api/auth/clients/revoke",
+    "POST /api/auth/clients/revoke-others",
+];
+
 /// `start`, letting `prep` lay out files in the temp home and adjust the daemon command.
 fn start_with(
     tag: &str,
@@ -85,15 +100,27 @@ fn start_with(
         &cfg,
         format!(
             "[server]\nport = {public}\n[engine]\ncommand = \"node\"\nargs = [{bin:?}]\nport = {engine}\n\
-             [rust.handlers]\n\"GET /api/auth/session\" = \"shadow\"\n\
+             [rust.handlers]\n{}\"GET /api/auth/session\" = \"shadow\"\n\
              \"GET /.well-known/vekrel/machine\" = \"shadow\"\n\
-             \"projects.readFile\" = \"shadow\"\n\"filesystem.browse\" = \"shadow\"\n"
+             \"projects.readFile\" = \"shadow\"\n\"filesystem.browse\" = \"shadow\"\n",
+            PLAN5_KEYS.map(|k| format!("\"{k}\" = \"shadow\"\n")).concat()
         ),
     )
     .unwrap();
     let out = std::fs::File::create(home.join("serve.log")).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vekrel"));
     prep(&home, &mut cmd);
+    // A key `prep` adds overrides the plan 5 shadow line, which comes first (TOML rejects duplicate
+    // keys), so the last line for a key wins.
+    let t = std::fs::read_to_string(&cfg).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let mut lines: Vec<&str> = t
+        .lines()
+        .rev()
+        .filter(|l| !l.starts_with('"') || seen.insert(l.split(" = ").next().unwrap()))
+        .collect();
+    lines.reverse();
+    std::fs::write(&cfg, lines.join("\n") + "\n").unwrap();
     let child = cmd
         .args(["serve", "--config"])
         .arg(&cfg)
@@ -2464,8 +2491,9 @@ fn pairing_consume_db_diff_shadow_vs_serve() {
 fn pairing_consume_race_rust_vs_node() {
     let Some((d, base, home, token)) = start_with("pair-race", |home, _| {
         let cfg = home.join("vekrel.toml");
+        // Writes serve only with the stream serving (the startup guard).
         let t = std::fs::read_to_string(&cfg).unwrap()
-            + "\"POST /api/auth/browser-session\" = \"serve\"\n\"POST /oauth/token\" = \"serve\"\n";
+            + "\"POST /api/auth/browser-session\" = \"serve\"\n\"POST /oauth/token\" = \"serve\"\n\"subscribeAuthAccess\" = \"serve\"\n";
         std::fs::write(&cfg, t).unwrap();
     }) else {
         return;

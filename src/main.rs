@@ -4,13 +4,13 @@ use vekrel::{
     auth::{self, shadow::AuthFiles},
     config,
     handlers::{
-        HandlerCtx, auth_access, auth_session, browse, clients, machine_descriptor, pairing,
+        self, HandlerCtx, auth_access, auth_session, browse, clients, machine_descriptor, pairing,
         pairing_links, read_file, ws_ticket,
     },
     http_seam::{self, RouteHandler, Seam},
     proxy_ws::{FrameTap, NoTap},
     recorder::Recorder,
-    rpc_seam::{self, UnaryHandler},
+    rpc_seam::{self, StreamHandler, UnaryHandler},
     server, supervisor,
 };
 
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(browse::Browse::from_env()),
     ];
     let mut rpc = rpc_seam::Seam::from_config(ws_handlers, &cfg.rust)
-        .with_dpop_mode(cfg.rust.mode("GET /ws dpop", config::Mode::Shadow));
+        .with_dpop_mode(cfg.rust.mode("GET /ws dpop", config::Mode::Serve));
     if let Some((userdata, files)) = &auth_files {
         let ctx = HandlerCtx {
             cwd: std::env::current_dir()?,
@@ -100,11 +100,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rpc.registry().clone(),
                     tailscale,
                 ));
-                // Writers store only when their route is configured `serve`.
+                let stream_mode = cfg.rust.mode(access.tag(), access.default_mode());
+                // A write's mode: configured (else `serve`, its default), then `guard_write`.
+                let route_mode = |key: &str, default| {
+                    handlers::guard_write(key, cfg.rust.mode(key, default), stream_mode)
+                };
+                // Writers store only when their route serves.
                 let writer = |key: &str| pairing_links::Writer {
                     auth: auth.clone(),
                     access: access.clone(),
-                    serve: cfg.rust.mode(key, config::Mode::Shadow) == config::Mode::Serve,
+                    serve: route_mode(key, config::Mode::Serve) == config::Mode::Serve,
                 };
                 let routes: [Arc<dyn RouteHandler>; 10] = [
                     auth.clone(),
@@ -127,14 +132,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ))),
                 ];
                 for h in routes {
-                    let mode = cfg.rust.mode(&http_seam::key(&*h), h.default_mode());
+                    let key = http_seam::key(&*h);
+                    let mode = route_mode(&key, h.default_mode());
+                    if mode != cfg.rust.mode(&key, h.default_mode()) {
+                        tracing::warn!(
+                            route = key,
+                            "{key} runs in shadow: subscribeAuthAccess is not serve, and Node's stream would miss Rust's writes"
+                        );
+                    }
                     seam = seam.with(mode, h);
                 }
                 // Without it (unsupported engine config) WS sessions are deferred: serve forwards to Node.
                 rpc = rpc.with_auth(auth);
-                let h: Arc<dyn rpc_seam::StreamHandler> = access;
-                let mode = cfg.rust.mode(h.tag(), h.default_mode());
-                rpc = rpc.with_stream(mode, h);
+                rpc = rpc.with_stream(stream_mode, access);
             }
         }
         let cwd = seam.ctx.cwd.clone();

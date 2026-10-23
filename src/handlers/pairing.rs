@@ -871,6 +871,10 @@ fn check_node_write(
 }
 
 impl RouteHandler for BrowserSession {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::POST, "/api/auth/browser-session")
     }
@@ -926,6 +930,10 @@ impl RouteHandler for BrowserSession {
 }
 
 impl RouteHandler for Token {
+    fn default_mode(&self) -> crate::config::Mode {
+        crate::config::Mode::Serve
+    }
+
     fn method_path(&self) -> (Method, &'static str) {
         (Method::POST, "/oauth/token")
     }

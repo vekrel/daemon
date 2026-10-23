@@ -29,3 +29,47 @@ pub struct HandlerCtx {
     /// WS: cancelled when the client interrupts the request or the socket closes.
     pub cancel: CancellationToken,
 }
+
+/// Routes that write `auth_sessions` / `auth_pairing_links`. Node's in-memory stream never sees
+/// Rust's writes, so they may only `serve` while `subscribeAuthAccess` serves too.
+pub const WRITE_KEYS: [&str; 6] = [
+    pairing_links::CREATE_KEY,
+    pairing_links::REVOKE_KEY,
+    pairing::BROWSER_SESSION_KEY,
+    pairing::TOKEN_KEY,
+    clients::REVOKE_KEY,
+    clients::REVOKE_OTHERS_KEY,
+];
+
+/// `mode` for route `key`, except a write configured `serve` while the stream is not: `shadow`.
+pub fn guard_write(
+    key: &str,
+    mode: crate::config::Mode,
+    stream: crate::config::Mode,
+) -> crate::config::Mode {
+    use crate::config::Mode;
+    if mode == Mode::Serve && stream != Mode::Serve && WRITE_KEYS.contains(&key) {
+        return Mode::Shadow;
+    }
+    mode
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Mode::{Off, Serve, Shadow};
+
+    #[test]
+    fn writes_serve_only_while_the_stream_serves() {
+        for key in WRITE_KEYS {
+            assert_eq!(guard_write(key, Serve, Serve), Serve, "{key}");
+            assert_eq!(guard_write(key, Serve, Shadow), Shadow, "{key}");
+            assert_eq!(guard_write(key, Serve, Off), Shadow, "{key}");
+            assert_eq!(guard_write(key, Off, Shadow), Off, "{key}");
+            assert_eq!(guard_write(key, Shadow, Serve), Shadow, "{key}");
+        }
+        // Reads are not guarded.
+        assert_eq!(guard_write(clients::LIST_KEY, Serve, Shadow), Serve);
+        assert_eq!(guard_write("GET /api/auth/session", Serve, Off), Serve);
+    }
+}
