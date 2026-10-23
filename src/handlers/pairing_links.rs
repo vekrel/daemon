@@ -170,13 +170,17 @@ pub(crate) async fn bypassed(a: &Arc<AuthAccess>) -> Option<&'static str> {
         .unwrap_or(Some("bypass_check_failed"))
 }
 
-/// `bypassed` for a writer: on `Ok`, hold the guard through the commit (or decline), so a
-/// subscribe forwarded to Node meanwhile waits for it (`Registry::drain`).
+/// `bypassed` for a writer: on `Ok`, move the guard into the blocking DB work, so it lives until
+/// the commit (or error) even if the request is dropped, and a subscribe forwarded to Node
+/// meanwhile waits for it (`Registry::drain`).
 pub(crate) async fn gate(
     a: &Arc<AuthAccess>,
-) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, &'static str> {
+) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, &'static str> {
     let g = a.registry().writing().await;
-    bypassed(a).await.map_or(Ok(g), Err)
+    bypassed(a)
+        .await
+        .map_or(Ok(g), Err)
+        .inspect(|_| a.registry().write_checked.notify_one())
 }
 
 fn declined(route: &str, why: &str) -> Option<Response<Bytes>> {
@@ -257,7 +261,7 @@ impl RouteHandler for CreatePairingToken {
                 return declined(ROUTE, "mode_mismatch");
             };
             if serve {
-                let _gate = match gate(&w.access).await {
+                let gate = match gate(&w.access).await {
                     Ok(g) => g,
                     Err(why) => return declined(ROUTE, why),
                 };
@@ -270,6 +274,8 @@ impl RouteHandler for CreatePairingToken {
                 );
                 let scopes = serde_json::to_string(&scopes).ok()?;
                 let wrote = blocking(move || {
+                    // Owned by the DB work: a dropped request future must not open the gate early.
+                    let _gate = gate;
                     write_db(&auth)
                         .and_then(|c| {
                             c.execute(
@@ -407,11 +413,13 @@ impl RouteHandler for RevokePairingLink {
                 return declined(ROUTE, "mode_mismatch");
             };
             let revoked = if serve {
-                let _gate = match gate(&w.access).await {
+                let gate = match gate(&w.access).await {
                     Ok(g) => g,
                     Err(why) => return declined(ROUTE, why),
                 };
                 blocking(move || {
+                    // Owned by the DB work: a dropped request future must not open the gate early.
+                    let _gate = gate;
                     let c = write_db(&auth).ok()?;
                     c.query_row(
                         "UPDATE auth_pairing_links SET revoked_at = ?2

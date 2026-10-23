@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{RwLock, RwLockReadGuard, watch};
+use tokio::sync::{Notify, OwnedRwLockReadGuard, RwLock, watch};
 use tokio_util::sync::CancellationToken;
 
 pub struct Registry {
@@ -14,7 +14,10 @@ pub struct Registry {
     changed: watch::Sender<()>,
     /// Shared by each Rust auth writer from its bypass check through its commit (`writing`);
     /// taken once, exclusively, before a socket's first frame Node may serve (`drain`).
-    write_gate: RwLock<()>,
+    write_gate: Arc<RwLock<()>>,
+    /// Signalled when a writer holding the gate passes its bypass check (a sync point for tests;
+    /// nothing waits on it in the daemon).
+    pub write_checked: Notify,
 }
 
 #[derive(Default)]
@@ -33,7 +36,8 @@ impl Default for Registry {
         Registry {
             inner: Mutex::default(),
             changed: watch::channel(()).0,
-            write_gate: RwLock::new(()),
+            write_gate: Arc::default(),
+            write_checked: Notify::new(),
         }
     }
 }
@@ -131,8 +135,8 @@ impl Registry {
     }
 
     /// Held by a writer from its `bypass::active` check (made after acquiring) to its commit.
-    pub async fn writing(&self) -> RwLockReadGuard<'_, ()> {
-        self.write_gate.read().await
+    pub async fn writing(&self) -> OwnedRwLockReadGuard<()> {
+        self.write_gate.clone().read_owned().await
     }
 
     /// Waits until every writer that passed its check has committed or declined; `false` if

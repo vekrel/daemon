@@ -1718,6 +1718,17 @@ fn revoked(files: &AuthFiles) -> bool {
 /// test reads the DB at that moment), so the forward must wait for the commit.
 #[tokio::test]
 async fn a_subscribe_forwarded_to_node_waits_for_an_in_flight_auth_write() {
+    race(false).await;
+}
+
+/// The client gives up mid-request (its future is dropped) while the commit is in flight: the
+/// commit still lands, so the gate must stay held until it does.
+#[tokio::test]
+async fn a_dropped_writer_request_keeps_the_gate_until_its_commit() {
+    race(true).await;
+}
+
+async fn race(cancel: bool) {
     let (_dir, files, db) = access_env();
     // Shadow: Node serves the subscribe; the session is verified, so no bypass cause exists.
     let s = access_seam(Mode::Shadow, &files);
@@ -1727,16 +1738,12 @@ async fn a_subscribe_forwarded_to_node_waits_for_an_in_flight_auth_write() {
     // Another connection holds SQLite's write lock: the writer passes its check, then waits.
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
     let writer = tokio::spawn(write);
-    let t = std::time::Instant::now();
-    while reg.drain(Duration::ZERO).await {
-        assert!(
-            t.elapsed() < Duration::from_secs(5),
-            "the writer never took the gate"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
+    tokio::time::timeout(Duration::from_secs(10), reg.write_checked.notified())
+        .await
+        .expect("the writer never passed its bypass check");
+    if cancel {
+        writer.abort();
     }
-    // Its bypass check (one read_dir) runs right after it takes the gate.
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let mut c = connect(r.proxy, "", &[("cookie", cookie(&["access:read"]))]).await;
     let sub = request(1, "subscribeAuthAccess", json!({}));
     send(&mut c, &sub).await;
@@ -1749,7 +1756,9 @@ async fn a_subscribe_forwarded_to_node_waits_for_an_in_flight_auth_write() {
     db.execute_batch("ROLLBACK").unwrap();
     assert_eq!(next_ev(&mut r).await, format!("text:{sub}"));
     assert!(revoked(&files), "Node's snapshot misses the write");
-    assert_eq!(writer.await.unwrap(), Some(200), "the writer committed");
+    if !cancel {
+        assert_eq!(writer.await.unwrap(), Some(200), "the writer committed");
+    }
     assert_eq!(reg.node_streams(), 1);
 }
 

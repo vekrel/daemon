@@ -166,12 +166,14 @@ impl RouteHandler for RevokeClient {
                 return declined(REVOKE_KEY, "mode_mismatch");
             };
             let revoked = if serve {
-                let _gate = match gate(&w.access).await {
+                let gate = match gate(&w.access).await {
                     Ok(g) => g,
                     Err(why) => return declined(REVOKE_KEY, why),
                 };
                 let (auth, id) = (w.auth.clone(), id.clone());
                 let ids = blocking(move || {
+                    // Owned by the DB work: a dropped request future must not open the gate early.
+                    let _gate = gate;
                     revoke(&write_db(&auth).ok()?, Some(&id), None, &iso_millis(now))
                         .map_err(|e| tracing::warn!(error = %e, "client revoke failed"))
                         .ok()
@@ -227,12 +229,14 @@ impl RouteHandler for RevokeOtherClients {
             };
             let cur = p.session_id;
             let count = if serve {
-                let _gate = match gate(&w.access).await {
+                let gate = match gate(&w.access).await {
                     Ok(g) => g,
                     Err(why) => return declined(REVOKE_OTHERS_KEY, why),
                 };
                 let auth = w.auth.clone();
                 let ids = blocking(move || {
+                    // Owned by the DB work: a dropped request future must not open the gate early.
+                    let _gate = gate;
                     revoke(&write_db(&auth).ok()?, None, Some(&cur), &iso_millis(now))
                         .map_err(|e| tracing::warn!(error = %e, "other clients revoke failed"))
                         .ok()

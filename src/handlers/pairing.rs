@@ -624,21 +624,27 @@ async fn run(
     let files = auth.files().clone();
     let a = Arc::new(a);
     let (f, a2, c2, acc) = (files.clone(), a.clone(), ctx.clone(), access.clone());
-    // Held from the bypass check (below, after acquiring) through the commit: `Registry::drain`.
+    // Held from the bypass check (below, after acquiring) through the commit, by the blocking
+    // task itself, so a dropped request cannot release it early: `Registry::drain`.
     let gate = if ctx.serve {
         Some(access.registry().writing().await)
     } else {
         None
     };
     let joined = tokio::task::spawn_blocking(move || {
+        let _gate = gate;
         // Before any write (the DPoP marker included).
         match acc.bypass().filter(|_| c2.serve) {
             Some(why) => Some(Err(why)),
-            None => consume(&f, &a2, &c2, now),
+            None => {
+                if c2.serve {
+                    acc.registry().write_checked.notify_one();
+                }
+                consume(&f, &a2, &c2, now)
+            }
         }
     })
     .await;
-    drop(gate);
     let issued = if a.browser {
         "browser_session_issuance_failed"
     } else {
