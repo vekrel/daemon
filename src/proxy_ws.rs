@@ -109,7 +109,12 @@ pub async fn handler(
         for_ticket: true,
         ..DpopCtx::default()
     };
-    let session = rpc.session(req.headers(), uri.query(), &dctx).await;
+    // Absolute-form targets are Node's (as in `proxy_http`): no Rust session evaluation.
+    let session = if uri.authority().is_some() {
+        WsSession::Deferred
+    } else {
+        rpc.session(req.headers(), uri.query(), &dctx).await
+    };
     let consumed = dctx.consumed.lock().expect("lock").clone();
     if let Some((_, sid)) = consumed {
         // Rust consumed the proof, so Node must never see it: it gets a ticket for the session.

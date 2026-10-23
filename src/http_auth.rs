@@ -122,7 +122,7 @@ fn ticket_sees_the_same(files: &AuthFiles, p: &Payload) -> bool {
         return false;
     }
     matches!(files.lookup(&p.sid), Some(Some(r))
-        if r.revoked_at.is_none() && r.scopes == p.scopes && r.method == p.method && r.expires_at_ms == p.exp)
+        if r.revoked_at.is_none() && r.subject == p.sub && r.scopes == p.scopes && r.method == p.method && r.expires_at_ms == p.exp)
 }
 
 /// `request.headers.dpop`: `Some(None)` when absent; `None` (Node's) when repeated or not ASCII.

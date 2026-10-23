@@ -55,6 +55,9 @@ pub fn create(secrets: &Path, p: &Proof, now_ms: i64) -> Created {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
         let mut f = o.open(&tmp)?;
+        // Like Node's chmod: the umask must not decide the marker's mode.
+        #[cfg(unix)]
+        f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         f.write_all(content(p, now_ms).as_bytes())?;
         f.sync_all()?;
         std::fs::hard_link(&tmp, &path)
@@ -144,6 +147,17 @@ mod tests {
         assert_eq!(names(d.path()), [name]);
         // No secrets directory: nothing published, Node answers.
         assert_eq!(create(&d.path().join("nope"), &proof(), 0), Created::Failed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_is_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let Created::Yes(path) = create(d.path(), &proof(), 0) else {
+            panic!("not created")
+        };
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+// NOTE: every key and proof in vectors.json is a throwaway test value, not a secret (see /.gitleaksignore).
 // Regenerates vectors.json from the engine's own verifier (packages/shared/src/dpop.ts):
 //   ENGINE=/path/to/Vekrel-Engine node tests/fixtures/dpop/gen_vectors.mjs > tests/fixtures/dpop/vectors.json
 // Cases follow packages/shared/src/dpop.test.ts plus edge cases the Rust port must agree on.

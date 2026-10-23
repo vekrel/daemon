@@ -1,0 +1,35 @@
+# tests/fixtures/dpop/vectors.json holds Node-generated test proofs and a throwaway private key (private_jwk_d): test-only, not secrets.
+# Fingerprints are line-based: after regenerating the fixture, rerun: gitleaks detect -s tests/fixtures/dpop/vectors.json --no-git -f json -r /dev/stdout
+tests/fixtures/dpop/vectors.json:jwt:9
+tests/fixtures/dpop/vectors.json:jwt:25
+tests/fixtures/dpop/vectors.json:jwt:41
+tests/fixtures/dpop/vectors.json:jwt:57
+tests/fixtures/dpop/vectors.json:jwt:73
+tests/fixtures/dpop/vectors.json:jwt:89
+tests/fixtures/dpop/vectors.json:jwt:105
+tests/fixtures/dpop/vectors.json:jwt:121
+tests/fixtures/dpop/vectors.json:jwt:137
+tests/fixtures/dpop/vectors.json:jwt:153
+tests/fixtures/dpop/vectors.json:jwt:167
+tests/fixtures/dpop/vectors.json:jwt:181
+tests/fixtures/dpop/vectors.json:jwt:195
+tests/fixtures/dpop/vectors.json:jwt:209
+tests/fixtures/dpop/vectors.json:jwt:223
+tests/fixtures/dpop/vectors.json:jwt:237
+tests/fixtures/dpop/vectors.json:jwt:251
+tests/fixtures/dpop/vectors.json:jwt:265
+tests/fixtures/dpop/vectors.json:jwt:279
+tests/fixtures/dpop/vectors.json:jwt:293
+tests/fixtures/dpop/vectors.json:jwt:307
+tests/fixtures/dpop/vectors.json:jwt:321
+tests/fixtures/dpop/vectors.json:jwt:391
+tests/fixtures/dpop/vectors.json:jwt:405
+tests/fixtures/dpop/vectors.json:jwt:419
+tests/fixtures/dpop/vectors.json:jwt:433
+tests/fixtures/dpop/vectors.json:jwt:447
+tests/fixtures/dpop/vectors.json:jwt:461
+tests/fixtures/dpop/vectors.json:jwt:475
+tests/fixtures/dpop/vectors.json:jwt:489
+tests/fixtures/dpop/vectors.json:jwt:503
+tests/fixtures/dpop/vectors.json:jwt:517
+tests/fixtures/dpop/vectors.json:jwt:531

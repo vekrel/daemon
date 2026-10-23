@@ -47,6 +47,8 @@ const SID: &str = "6f1c0d3e-0000-4000-8000-000000000001";
 const DEV_SID: &str = "dev-auth-1";
 /// A session whose row grants fewer scopes than its token claims.
 const NARROW_SID: &str = "6f1c0d3e-0000-4000-8000-000000000002";
+/// A session whose row belongs to another subject than its token claims.
+const OTHER_SUB_SID: &str = "6f1c0d3e-0000-4000-8000-000000000003";
 const DESC: &str = r#"{"policy":"loopback-browser","bootstrapMethods":["one-time-token"],"sessionMethods":["browser-session-cookie","bearer-access-token","dpop-access-token"],"sessionCookieName":"t3_session_3789_fb52c29e3256","serverUpdateScope":"machine:maintain"}"#;
 
 fn b64_sha256(s: &str) -> String {
@@ -139,8 +141,10 @@ fn home() -> (tempfile::TempDir, Arc<AuthFiles>) {
          (?2, 'native', '[\"orchestration:read\",\"filesystem:read\"]',
          'dpop-access-token', '2026-01-01T00:00:00.000Z', '2030-01-01T00:00:00.123Z', NULL),
          (?3, 'native', '[\"orchestration:read\"]',
+         'dpop-access-token', '2026-01-01T00:00:00.000Z', '2030-01-01T00:00:00.123Z', NULL),
+         (?4, 'someone-else', '[\"orchestration:read\",\"filesystem:read\"]',
          'dpop-access-token', '2026-01-01T00:00:00.000Z', '2030-01-01T00:00:00.123Z', NULL)",
-        [SID, DEV_SID, NARROW_SID],
+        [SID, DEV_SID, NARROW_SID, OTHER_SUB_SID],
     )
     .unwrap();
     let files = Arc::new(AuthFiles::new(
@@ -589,6 +593,7 @@ async fn ws_conversion_only_for_trusted_origins_and_sessions_node_sees_the_same(
         (format!("evil.example:{port}"), token(), false),
         (format!("127.0.0.1:{port}"), token_for(NARROW_SID), false),
         (format!("127.0.0.1:{port}"), token_for(DEV_SID), false),
+        (format!("127.0.0.1:{port}"), token_for(OTHER_SUB_SID), false),
         (format!("[::1]:{port}"), token(), true),
     ];
     for (i, (host, tok, converted)) in cases.iter().enumerate() {
@@ -614,4 +619,29 @@ async fn ws_conversion_only_for_trusted_origins_and_sessions_node_sees_the_same(
             "{host}"
         );
     }
+}
+
+#[tokio::test]
+async fn ws_absolute_form_target_is_nodes_and_never_evaluated() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (home, files) = home();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let port = ws_proxy(&files, seen.clone()).await;
+    let host = format!("127.0.0.1:{port}");
+    let proof = client().proof("GET", &format!("http://{host}/ws"), "abs1", &token());
+    let mut s = tokio::net::TcpStream::connect(&host).await.unwrap();
+    let req = format!(
+        "GET http://{host}/ws HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\
+         Authorization: DPoP {}\r\nDPoP: {proof}\r\n\r\n",
+        token()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = [0u8; 12];
+    s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"HTTP/1.1 101");
+    let (q, h) = seen.lock().unwrap()[0].clone();
+    assert!(!q.contains("wsTicket="), "{q}");
+    assert_eq!(h["dpop"], proof.as_str(), "Node gets the proof untouched");
+    assert!(markers(home.path()).is_empty());
 }
