@@ -1095,7 +1095,7 @@ fn dpop_native_client_through_rust() {
             ("subject_token", pairing.as_str()),
             (
                 "subject_token_type",
-                "urn:t3:params:oauth:token-type:machine-bootstrap",
+                "urn:vekrel:params:oauth:token-type:machine-bootstrap",
             ),
             (
                 "requested_token_type",
@@ -2201,7 +2201,7 @@ fn token_form(cred: &str, extra: &[(&str, &str)]) -> String {
     .append_pair("subject_token", cred)
     .append_pair(
         "subject_token_type",
-        "urn:t3:params:oauth:token-type:machine-bootstrap",
+        "urn:vekrel:params:oauth:token-type:machine-bootstrap",
     )
     .append_pair(
         "requested_token_type",
@@ -3079,13 +3079,13 @@ fn read_plumbing_matches_node() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let http = reqwest::Client::new();
-    let proto = ("x-t3-orchestration-protocol", "2");
+    let proto = ("x-vekrel-orchestration-protocol", "2");
     rt.block_on(async {
         let shell = format!("{base}/api/orchestration/shell");
         let c = ("cookie", ck.as_str());
         for (h, want) in [
             (vec![c], 400),
-            (vec![c, ("x-t3-orchestration-protocol", "1")], 400),
+            (vec![c, ("x-vekrel-orchestration-protocol", "1")], 400),
             (vec![c, proto], 200),
         ] {
             let (s, _, _) = raw_get(&http, &shell, &h).await;
@@ -3893,7 +3893,7 @@ fn node_shell(home: &Path, cookie: &str) -> (u16, i64, Vec<String>, String) {
         "-H",
         &format!("cookie: {cookie}"),
         "-H",
-        "x-t3-orchestration-protocol: 2",
+        "x-vekrel-orchestration-protocol: 2",
         &format!("{}/api/orchestration/shell", engine_base(home)),
     ]);
     if code != 200 {
@@ -4854,7 +4854,7 @@ fn shell_get(
     cookie: Option<&str>,
     ae: Option<&str>,
 ) -> (u16, reqwest::header::HeaderMap, String) {
-    let mut h = vec![("x-t3-orchestration-protocol", "2")];
+    let mut h = vec![("x-vekrel-orchestration-protocol", "2")];
     if let Some(c) = cookie {
         h.push(("cookie", c));
     }

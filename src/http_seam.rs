@@ -244,11 +244,14 @@ fn form_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// `x-t3-orchestration-protocol: 2`, which every `/api/orchestration/*` route requires
+/// `x-vekrel-orchestration-protocol: 2`, which every `/api/orchestration/*` route requires
 /// (`contracts/machineHttp.ts:81-85`). Without it Effect answers its own 400: handlers decline.
 /// A repeated header reaches Node joined (`2, 2`) and fails too.
 pub fn orchestration_protocol(req: &Parts) -> bool {
-    let mut v = req.headers.get_all("x-t3-orchestration-protocol").iter();
+    let mut v = req
+        .headers
+        .get_all("x-vekrel-orchestration-protocol")
+        .iter();
     v.next().is_some_and(|v| v == "2") && v.next().is_none()
 }
 
@@ -1390,7 +1393,7 @@ mod tests {
         let p = |vals: &[&str]| {
             let mut b = Request::get("/api/orchestration/shell");
             for v in vals {
-                b = b.header("x-t3-orchestration-protocol", *v);
+                b = b.header("x-vekrel-orchestration-protocol", *v);
             }
             orchestration_protocol(&b.body(()).unwrap().into_parts().0)
         };

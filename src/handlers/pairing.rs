@@ -1014,7 +1014,7 @@ impl RouteHandler for Token {
                 ),
                 literal(
                     "subject_token_type",
-                    "urn:t3:params:oauth:token-type:machine-bootstrap",
+                    "urn:vekrel:params:oauth:token-type:machine-bootstrap",
                 ),
                 literal("requested_token_type", ACCESS_TOKEN_TYPE),
             )
@@ -1206,7 +1206,7 @@ mod tests {
         .append_pair("subject_token", cred)
         .append_pair(
             "subject_token_type",
-            "urn:t3:params:oauth:token-type:machine-bootstrap",
+            "urn:vekrel:params:oauth:token-type:machine-bootstrap",
         )
         .append_pair("requested_token_type", ACCESS_TOKEN_TYPE);
         f.extend_pairs(extra.iter().copied());
